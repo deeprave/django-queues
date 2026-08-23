@@ -9,6 +9,8 @@ class MemoryAsyncPriorityQueue(AsyncQueue):
     worker_class = "django_queue.backends.memory.MemoryAsyncQueueWorker"
 
     def __init__(self, _: str | None = None, options: dict | None = None, **kwargs):
+        if (options is not None and "stack" in options) or "stack" in kwargs:
+            raise ValueError("Priority queues do not accept the stack option")
         options = {} if options is None else options
         options |= kwargs
         self.entry_class = options.pop("entry_class", self.entry_class)

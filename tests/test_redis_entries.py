@@ -46,6 +46,18 @@ async def _run_until_terminal(queue, entry_id, handler):
             await task
 
 
+async def _assert_delayed_entry_is_due(queue, entry_id):
+    client = queue._provider._async_redis()
+    seconds, microseconds = await client.time()
+    deadline = await client.zscore(
+        queue._provider._entry_delayed_name,
+        str(entry_id),
+    )
+
+    assert deadline is not None
+    assert deadline <= seconds * 1_000_000 + microseconds
+
+
 def test_find_reports_a_missing_retained_record(redis_entry_queue):
     with pytest.raises(QueueEntryNotFoundError):
         redis_entry_queue.find(uuid4())
@@ -188,7 +200,9 @@ def test_redis_event_stack_dequeues_the_newest_event(redis_client):
         queue.close()
 
 
-def test_redis_stack_recovery_returns_the_recovered_entry_first(redis_client):
+def test_redis_stack_recovery_returns_the_recovered_entry_first(
+    redis_client, eventually
+):
     """Catch stack claim recovery inserting on the opposite side from ``RPOP``."""
     queue = RedisAsyncStack(redis_client, queue_name=f"stack-recovery-{uuid4().hex}")
 
@@ -198,8 +212,17 @@ def test_redis_stack_recovery_returns_the_recovered_entry_first(redis_client):
             second_id = await queue.aenqueue("second")
             claimed = await queue.aclaim(uuid4(), lease_seconds=0.001)
             assert claimed.id == second_id
-            await asyncio.sleep(0.01)
-            recovered, discarded = await queue._provider.arecover(1)
+
+            recovery = None
+
+            async def assert_recovered():
+                nonlocal recovery
+                recovery = await queue._provider.arecover(1)
+                assert recovery == (1, 0)
+
+            await eventually(1, assert_recovered)
+            assert recovery is not None
+            recovered, discarded = recovery
             return (
                 first_id,
                 second_id,
@@ -217,7 +240,9 @@ def test_redis_stack_recovery_returns_the_recovered_entry_first(redis_client):
     assert dequeued_id != first_id
 
 
-def test_redis_stack_delayed_retry_returns_the_retried_entry_first(redis_client):
+def test_redis_stack_delayed_retry_returns_the_retried_entry_first(
+    redis_client, eventually
+):
     """Catch delayed stack retry promotion inserting on the opposite side from ``RPOP``."""
     queue = RedisAsyncStack(redis_client, queue_name=f"stack-retry-{uuid4().hex}")
 
@@ -229,7 +254,10 @@ def test_redis_stack_delayed_retry_returns_the_retried_entry_first(redis_client)
             claimed = await queue.aclaim(worker_id)
             assert claimed.id == second_id
             assert await queue.arelease(second_id, worker_id, 0.001)
-            await asyncio.sleep(0.01)
+            await eventually(
+                1,
+                lambda: _assert_delayed_entry_is_due(queue, second_id),
+            )
             return first_id, second_id, (await queue.aclaim(uuid4())).id
         finally:
             await queue.aclose()
@@ -240,7 +268,9 @@ def test_redis_stack_delayed_retry_returns_the_retried_entry_first(redis_client)
     assert claimed_id != first_id
 
 
-def test_redis_event_stack_delayed_retry_dequeues_the_retried_event_first(redis_client):
+def test_redis_event_stack_delayed_retry_dequeues_the_retried_event_first(
+    redis_client, eventually
+):
     """Catch delayed event-stack promotion inserting on the opposite side from ``RPOP``."""
     queue = RedisEventQueue(
         redis_client,
@@ -255,7 +285,10 @@ def test_redis_event_stack_delayed_retry_dequeues_the_retried_event_first(redis_
             claimed = await queue._provider.aclaim(worker_id)
             assert claimed.id == second_id
             assert await queue._provider.arelease(second_id, worker_id, 0.001)
-            await asyncio.sleep(0.01)
+            await eventually(
+                1,
+                lambda: _assert_delayed_entry_is_due(queue, second_id),
+            )
             return first_id, second_id, (await queue.adequeue()).id
         finally:
             await queue._provider.aclose()

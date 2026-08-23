@@ -3,6 +3,8 @@ try:
 
     class RedisAsyncPriorityQueue(RedisAsyncQueue):
         def __init__(self, redis_url: str, options: dict | None = None, **kwargs):
+            if (options is not None and "stack" in options) or "stack" in kwargs:
+                raise ValueError("Priority queues do not accept the stack option")
             super().__init__(redis_url, options, **kwargs)
 
         @property

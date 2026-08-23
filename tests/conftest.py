@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import os
 
 import pytest
@@ -43,6 +45,31 @@ try:
 
 except ImportError:
     pass
+
+
+@pytest.fixture
+def eventually():
+    async def assert_eventually(timeout, assertion):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+
+        async def invoke_assertion():
+            result = assertion()
+            if inspect.isawaitable(result):
+                await result
+
+        while True:
+            try:
+                await invoke_assertion()
+                return
+            except AssertionError:
+                if loop.time() >= deadline:
+                    break
+                await asyncio.sleep(min(0.001, deadline - loop.time()))
+
+        await invoke_assertion()
+
+    return assert_eventually
 
 
 @pytest.fixture

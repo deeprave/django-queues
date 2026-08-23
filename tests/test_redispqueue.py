@@ -30,6 +30,18 @@ def test_init(redis_url):
     assert queue.capacity == 0  # Unlimited size by default
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"options": {"stack": True}},
+        {"stack": False},
+    ],
+)
+def test_init_rejects_stack_option(arguments):
+    with pytest.raises(ValueError):
+        RedisAsyncPriorityQueue("redis://localhost:6379/0", **arguments)
+
+
 def test_capacity(redis_priority_queue):
     """
     Test the capacity of the priority queue.

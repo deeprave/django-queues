@@ -12,6 +12,18 @@ def priority_queue():
     return MemoryAsyncPriorityQueue(options={"maxsize": 5})
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"options": {"stack": True}},
+        {"stack": False},
+    ],
+)
+def test_init_rejects_stack_option(arguments):
+    with pytest.raises(ValueError):
+        MemoryAsyncPriorityQueue(**arguments)
+
+
 def test_add_to_full_queue_raises_exception(priority_queue):
     priority_queue.add(
         (1, "item1"), (2, "item2"), (3, "item3"), (4, "item4"), (5, "item5")
