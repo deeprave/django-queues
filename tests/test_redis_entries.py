@@ -15,6 +15,8 @@ from django_queue.backends.redis import (
     RedisAsyncPriorityQueue,
     RedisAsyncQueue,
     RedisAsyncQueueWorker,
+    RedisAsyncStack,
+    RedisEventQueue,
 )
 from django_queue.entries import QueueEntryStatus
 from django_queue.observers import _discard_observers_for
@@ -42,6 +44,18 @@ async def _run_until_terminal(queue, entry_id, handler):
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
+
+
+async def _assert_delayed_entry_is_due(queue, entry_id):
+    client = queue._provider._async_redis()
+    seconds, microseconds = await client.time()
+    deadline = await client.zscore(
+        queue._provider._entry_delayed_name,
+        str(entry_id),
+    )
+
+    assert deadline is not None
+    assert deadline <= seconds * 1_000_000 + microseconds
 
 
 def test_find_reports_a_missing_retained_record(redis_entry_queue):
@@ -108,6 +122,181 @@ def test_direct_dequeue_is_atomic_and_fifo(redis_entry_queue):
     assert redis_entry_queue.dequeue().id == second_id
     with pytest.raises(QueueEmptyException):
         redis_entry_queue.dequeue()
+
+
+def test_redis_stack_direct_dequeue_returns_the_newest_tracked_entry(redis_client):
+    """Catch stack enqueue inserting on the opposite side from ``RPOP``."""
+    queue = RedisAsyncStack(redis_client, queue_name=f"stack-entries-{uuid4().hex}")
+    try:
+        first_id = queue.enqueue("first")
+        second_id = queue.enqueue("second")
+
+        assert queue.dequeue().id == second_id
+        assert queue.dequeue().id == first_id
+    finally:
+        queue.close()
+
+
+def test_redis_stack_scheduled_promotion_returns_the_newest_entry(redis_client):
+    """Catch scheduled stack promotion inserting on the opposite side from ``RPOP``."""
+    queue = RedisAsyncStack(redis_client, queue_name=f"stack-scheduled-{uuid4().hex}")
+
+    async def exercise():
+        try:
+            first_id = await queue.aenqueue("first")
+            now = await queue.clock.anow()
+            second_id = await queue.aenqueue("second", available_at=now + 60)
+            await queue._provider._async_redis().zadd(
+                queue._provider._entry_scheduled_name, {str(second_id): 0}
+            )
+
+            return (
+                first_id,
+                second_id,
+                (await queue.adequeue()).id,
+                (await queue.adequeue()).id,
+            )
+        finally:
+            await queue.aclose()
+
+    first_id, second_id, first_dequeued, second_dequeued = asyncio.run(exercise())
+
+    assert first_dequeued == second_id
+    assert second_dequeued == first_id
+
+
+def test_redis_stack_already_due_enqueue_returns_the_newest_entry(redis_client):
+    """Catch the already-due stack branch inserting on the opposite side from ``RPOP``."""
+    queue = RedisAsyncStack(redis_client, queue_name=f"stack-due-{uuid4().hex}")
+
+    async def exercise():
+        try:
+            first_id = await queue.aenqueue("first")
+            second_id = await queue.aenqueue(
+                "second", available_at=(await queue.clock.anow()) - 1
+            )
+            return first_id, second_id, (await queue.adequeue()).id
+        finally:
+            await queue.aclose()
+
+    _, second_id, dequeued_id = asyncio.run(exercise())
+
+    assert dequeued_id == second_id
+
+
+def test_redis_event_stack_dequeues_the_newest_event(redis_client):
+    """Catch event stack enqueue inserting on the opposite side from ``RPOP``."""
+    queue = RedisEventQueue(
+        redis_client,
+        options={"queue_name": f"event-stack-{uuid4().hex}", "stack": True},
+    )
+    try:
+        first_id = queue.enqueue("first")
+        second_id = queue.enqueue("second")
+
+        assert queue.dequeue().id == second_id
+        assert queue.dequeue().id == first_id
+    finally:
+        queue.close()
+
+
+def test_redis_stack_recovery_returns_the_recovered_entry_first(
+    redis_client, eventually
+):
+    """Catch stack claim recovery inserting on the opposite side from ``RPOP``."""
+    queue = RedisAsyncStack(redis_client, queue_name=f"stack-recovery-{uuid4().hex}")
+
+    async def exercise():
+        try:
+            first_id = await queue.aenqueue("first")
+            second_id = await queue.aenqueue("second")
+            claimed = await queue.aclaim(uuid4(), lease_seconds=0.001)
+            assert claimed.id == second_id
+
+            recovery = None
+
+            async def assert_recovered():
+                nonlocal recovery
+                recovery = await queue._provider.arecover(1)
+                assert recovery == (1, 0)
+
+            await eventually(1, assert_recovered)
+            assert recovery is not None
+            recovered, discarded = recovery
+            return (
+                first_id,
+                second_id,
+                recovered,
+                discarded,
+                (await queue.adequeue()).id,
+            )
+        finally:
+            await queue.aclose()
+
+    first_id, second_id, recovered, discarded, dequeued_id = asyncio.run(exercise())
+
+    assert (recovered, discarded) == (1, 0)
+    assert dequeued_id == second_id
+    assert dequeued_id != first_id
+
+
+def test_redis_stack_delayed_retry_returns_the_retried_entry_first(
+    redis_client, eventually
+):
+    """Catch delayed stack retry promotion inserting on the opposite side from ``RPOP``."""
+    queue = RedisAsyncStack(redis_client, queue_name=f"stack-retry-{uuid4().hex}")
+
+    async def exercise():
+        try:
+            first_id = await queue.aenqueue("first")
+            second_id = await queue.aenqueue("second")
+            worker_id = uuid4()
+            claimed = await queue.aclaim(worker_id)
+            assert claimed.id == second_id
+            assert await queue.arelease(second_id, worker_id, 0.001)
+            await eventually(
+                1,
+                lambda: _assert_delayed_entry_is_due(queue, second_id),
+            )
+            return first_id, second_id, (await queue.aclaim(uuid4())).id
+        finally:
+            await queue.aclose()
+
+    first_id, second_id, claimed_id = asyncio.run(exercise())
+
+    assert claimed_id == second_id
+    assert claimed_id != first_id
+
+
+def test_redis_event_stack_delayed_retry_dequeues_the_retried_event_first(
+    redis_client, eventually
+):
+    """Catch delayed event-stack promotion inserting on the opposite side from ``RPOP``."""
+    queue = RedisEventQueue(
+        redis_client,
+        options={"queue_name": f"event-stack-retry-{uuid4().hex}", "stack": True},
+    )
+
+    async def exercise():
+        try:
+            first_id = await queue.aenqueue("first")
+            second_id = await queue.aenqueue("second")
+            worker_id = uuid4()
+            claimed = await queue._provider.aclaim(worker_id)
+            assert claimed.id == second_id
+            assert await queue._provider.arelease(second_id, worker_id, 0.001)
+            await eventually(
+                1,
+                lambda: _assert_delayed_entry_is_due(queue, second_id),
+            )
+            return first_id, second_id, (await queue.adequeue()).id
+        finally:
+            await queue._provider.aclose()
+
+    first_id, second_id, dequeued_id = asyncio.run(exercise())
+
+    assert dequeued_id == second_id
+    assert dequeued_id != first_id
 
 
 def test_redis_schedules_a_future_entry_without_making_it_claimable(redis_entry_queue):
@@ -185,6 +374,33 @@ def test_redis_dequeue_promotes_due_scheduled_entry(redis_entry_queue):
     assert dequeued_id == entry_id
 
 
+def test_concurrent_redis_dequeue_delivers_a_due_scheduled_entry_once(redis_client):
+    async def exercise():
+        queue_name = f"concurrent-dequeue-{uuid4().hex}"
+        first = RedisAsyncQueue(redis_client, queue_name=queue_name)
+        second = RedisAsyncQueue(redis_client, queue_name=queue_name)
+        try:
+            now = await first.clock.anow()
+            entry_id = await first.aenqueue("due", available_at=now + 60)
+            await first._provider._async_redis().zadd(
+                first._provider._entry_scheduled_name, {str(entry_id): 0}
+            )
+            results = await asyncio.gather(
+                first.adequeue(), second.adequeue(), return_exceptions=True
+            )
+            return entry_id, results
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+    entry_id, results = asyncio.run(exercise())
+
+    assert [result.id for result in results if not isinstance(result, Exception)] == [
+        entry_id
+    ]
+    assert sum(isinstance(result, QueueEmptyException) for result in results) == 1
+
+
 def test_redis_priority_claim_promotes_due_work_by_priority(redis_client):
     queue = RedisAsyncPriorityQueue(redis_client, queue_name=f"priority-{uuid4().hex}")
 
@@ -241,6 +457,35 @@ def test_redis_priority_dequeue_promotes_due_scheduled_work(redis_client):
     entry_id, dequeued_id = asyncio.run(exercise())
 
     assert dequeued_id == entry_id
+
+
+def test_concurrent_redis_priority_dequeue_delivers_a_due_scheduled_entry_once(
+    redis_client,
+):
+    async def exercise():
+        queue_name = f"concurrent-priority-dequeue-{uuid4().hex}"
+        first = RedisAsyncPriorityQueue(redis_client, queue_name=queue_name)
+        second = RedisAsyncPriorityQueue(redis_client, queue_name=queue_name)
+        try:
+            now = await first.clock.anow()
+            entry_id = await first.aenqueue("due", priority=10, available_at=now + 60)
+            await first._provider._async_redis().zadd(
+                first._provider._entry_scheduled_name, {str(entry_id): 0}
+            )
+            results = await asyncio.gather(
+                first.adequeue(), second.adequeue(), return_exceptions=True
+            )
+            return entry_id, results
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+    entry_id, results = asyncio.run(exercise())
+
+    assert [result.id for result in results if not isinstance(result, Exception)] == [
+        entry_id
+    ]
+    assert sum(isinstance(result, QueueEmptyException) for result in results) == 1
 
 
 def test_raw_values_and_retained_entries_are_independent(redis_entry_queue):

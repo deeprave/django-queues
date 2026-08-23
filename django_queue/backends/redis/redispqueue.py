@@ -3,6 +3,8 @@ try:
 
     class RedisAsyncPriorityQueue(RedisAsyncQueue):
         def __init__(self, redis_url: str, options: dict | None = None, **kwargs):
+            if (options is not None and "stack" in options) or "stack" in kwargs:
+                raise ValueError("Priority queues do not accept the stack option")
             super().__init__(redis_url, options, **kwargs)
 
         @property
@@ -64,8 +66,7 @@ try:
             await self._provider.apromote_scheduled_priority()
 
         async def _apop(self):
-            await self._apromote_scheduled()
-            return await self._provider.apop_priority()
+            return await self._provider.apop_scheduled_priority()
 
         async def _adiscard(self, entry_id) -> None:
             await self._provider.adiscard_priority(entry_id)

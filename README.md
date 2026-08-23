@@ -8,11 +8,11 @@
 
 This is an implementation of message queues for Django.
 
-The current implementation supports an in-memory queue and a Redis-backed pub/sub queue with custom Lua for atomic updates.
+The current implementation supports an in-memory queue and a Redis-backed pub/sub queue with Redis Functions (Lua) for atomic updates.
 
 ## Requirements
 
-`django-queues` requires Python 3.14 or later, as queue entry IDs use the standard-library UUIDv7 implementation to support ordering introduced in Python 3.14.
+`django-queues` requires Python 3.14 or later, as queue entry IDs use the standard-library UUIDv7 implementation to support ordering introduced in Python 3.14. Redis-backed queues require Redis 7 or later. The application requires FCALL permission, and the deployment `redis_lua_lib` management command requires Function-library deployment permissions. Redis Cluster is not currently supported.
 
 ## Choose a queue type
 
@@ -62,10 +62,66 @@ QUEUES = {
 
 This configures a Redis-backed FIFO async queue with JSON values. Redis-backed queues own their asynchronous connections; application code does not supply Redis client instances.
 
-To implement a stack (FILO), use
+## ⚠️ Required Redis initialisation
+
+> **Redis-backed queues cannot start until the bundled `django_queues` Redis
+> Function library has been installed on every target Redis instance.** This is
+> a required deployment step, not an application-startup responsibility.
+
+Run this with a deployment credential after Redis is available and before any
+application or worker that uses Redis-backed queues starts:
+
+```sh
+python manage.py redis_lua_lib --deploy
+```
+
+The deployment credential needs permission to inspect and load Redis Function
+libraries, and to acquire and release the command's short-lived deployment
+lease (`SET`, `EVAL`, and the scripted `GET`/`DEL` release). Application
+credentials need only the Function calls required by normal queue operation.
+
+The command derives and deduplicates its Redis targets from `QUEUES`. Its
+exceptional `--redis-url` option deploys to only that URL, but avoid it where
+possible because command-line URLs can expose credentials through shell
+history. The command without `--deploy` is a non-mutating preflight check; it
+reports the installed library and API versions, and fails if deployment is
+required.
+
+Then, with the application credential, verify the application can invoke the
+library:
+
+```sh
+python manage.py redis_lua_compat
+```
+
+The demo Compose configurations show the intended startup ordering: their
+dashboard service waits for Redis to become healthy, runs
+`redis_lua_lib --deploy`, and only then starts Django. See
+[`demo_aq/compose.yaml`](demo_aq/compose.yaml),
+[`demo_eq/compose.yaml`](demo_eq/compose.yaml), and
+[`demo_pq/compose.yaml`](demo_pq/compose.yaml).
+
+### Redis persistence
+
+Redis Functions are persisted with Redis data: they are included in RDB
+snapshots and the AOF. They are therefore not inherently lost on restart. A
+Docker container that is recreated, however, loses its writable filesystem
+unless Redis data is stored in a persistent volume. The demo Redis services
+deliberately have no `/data` volume, so `docker compose down` followed by a new
+`up` starts a fresh Redis database and requires the library to be deployed
+again.
+
+> **Deployment advice:** mount Redis `/data` on persistent storage and
+> configure Redis persistence (AOF is usually appropriate) when the deployed
+> library should survive Redis-service recreation. Without that volume,
+> recreating Redis discards the library and it must be deployed again before
+> applications start. Keep the explicit deployment step as a startup/deployment
+> safety check.
+
+To implement a stack (LIFO), use
 `django_queue.backends.redis.RedisAsyncStackJson`, or add `"stack": True`.
 
-All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`; initialisation only constructs queue services and never starts a worker. Queue aliases cannot contain `*`, `?`, `[` or `]`.
+All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`; initialisation only constructs queue services and never starts a worker. Queue aliases may contain only ASCII letters, digits, `_`, and `-`.
 
 ### Configuration reference
 
@@ -327,7 +383,7 @@ The worker dispatches one entry at a time and runs until cancelled. On cancellat
 Redis queues use leased claims for at-least-once delivery. A worker claims an
 entry, renews its lease while dispatching, and atomically settles its terminal entry outcome only while it still owns that claim. Expired claims return the same entry ID to pending work, so a process failure can cause the handler to execute more than once. Handlers that make external changes must therefore be idempotent. Queue backends without claim-lease support retain best-effort delivery.
 
-Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery operations, owned by the Redis worker and its private queue provider rather than the public queue API. Other transports may use a different native model. Redis keys, scripts, timestamps, and record layout are not public contract. Redis Cluster is not supported by the Redis delivery implementation.
+Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery operations, owned by the Redis worker and its private queue provider rather than the public queue API. Other transports may use a different native model. Redis keys, Functions, timestamps, and record layout are not public contract. Redis Cluster is not supported by the Redis delivery implementation.
 
 If a terminal outcome cannot be persisted because of an infrastructure failure, the worker logs the failure and continues. When it can still read a `running` entry, it makes one best-effort attempt to record a safe `QueuePersistenceError` failure outcome. If it cannot confirm either terminal outcome, the worker raises `QueuePersistenceError` rather than accepting further entries.
 

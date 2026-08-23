@@ -33,7 +33,9 @@ def test_providers_implement_the_minimal_public_provider_contract():
     assert "QueueProviderRedis" not in django_queue.__all__
 
 
-def test_redis_provider_claims_and_removes_an_owned_entry(redis_client):
+def test_redis_provider_claims_and_removes_an_owned_entry(
+    redis_client, redis_function_library
+):
     async def exercise():
         provider = QueueProviderRedis(
             redis_client,
@@ -55,7 +57,7 @@ def test_redis_provider_claims_and_removes_an_owned_entry(redis_client):
 
 
 def test_redis_provider_recovers_an_expired_priority_claim_to_the_priority_store(
-    redis_client,
+    redis_client, redis_function_library
 ):
     """arecover unconditionally redelivers to the plain pending list --
     correct for a plain FIFO/stack queue, but a priority-variant queue's
@@ -94,7 +96,7 @@ def test_redis_provider_recovers_an_expired_priority_claim_to_the_priority_store
 
 
 def test_redis_provider_recover_priority_tolerates_a_record_missing_the_priority_field(
-    redis_client,
+    redis_client, redis_function_library
 ):
     """A stored entry record is always written by QueueEntry.to_dict(), which
     serialises every dataclass field including `priority`, so no current

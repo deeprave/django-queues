@@ -1,7 +1,7 @@
 [project]
 name = "django-queues"
-version = "1.1.0"
-description = "Implementation of queues for Django"
+version = "1.2.0"
+description = "Implementation of async/task and event queues for Django"
 readme = "README.md"
 license = { file = "LICENSE.md" }
 requires-python = ">=3.14"
@@ -11,6 +11,7 @@ authors = [
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
 ]
 dependencies = [
     "asgiref>=3.12.1",

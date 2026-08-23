@@ -8,6 +8,7 @@ from django.conf import settings as django_settings
 from django.utils.connection import BaseConnectionHandler, ConnectionProxy
 from django.utils.module_loading import import_string
 
+from .aliases import validate_queue_alias
 from .backends import InvalidQueueBackendError
 from .backends.base import AsyncQueue, EventQueue
 from .clock import ClockTime
@@ -44,7 +45,6 @@ __all__ = (
 
 
 DEFAULT_QUEUE_ALIAS = "default"
-_FORBIDDEN_QUEUE_ALIAS_CHARACTERS = frozenset("*?[]")
 
 
 class QueueRegistry(BaseConnectionHandler):
@@ -66,16 +66,7 @@ class QueueRegistry(BaseConnectionHandler):
 
         configured_queues = {}
         for alias, options in settings.items():
-            if not isinstance(alias, str) or not alias:
-                raise InvalidQueueBackendError(
-                    f"Queue alias {alias!r} must be a non-empty string"
-                )
-            if any(
-                character in alias for character in _FORBIDDEN_QUEUE_ALIAS_CHARACTERS
-            ):
-                raise InvalidQueueBackendError(
-                    f"Queue alias '{alias}' cannot contain *, ?, [, or ]"
-                )
+            validate_queue_alias(alias)
             if not isinstance(options, Mapping):
                 raise InvalidQueueBackendError(
                     f"Queue alias '{alias}' must use a mapping configuration"
