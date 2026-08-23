@@ -6,13 +6,13 @@
 
 # Django Queues
 
-This is an implementation of message queues for Django.
+This is an implementation of task/async and event queues for Django.
 
-The current implementation supports an in-memory queue and a Redis-backed pub/sub queue with Redis Functions (Lua) for atomic updates.
+The current implementation supports both memory-backed and Redis-backed pub/sub queue with Redis Functions (Lua) for atomic updates.
 
 ## Requirements
 
-`django-queues` requires Python 3.14 or later, as queue entry IDs use the standard-library UUIDv7 implementation to support ordering introduced in Python 3.14. Redis-backed queues require Redis 7 or later. The application requires FCALL permission, and the deployment `redis_lua_lib` management command requires Function-library deployment permissions. Redis Cluster is not currently supported.
+`django-queues` requires Python 3.14 or later, as queue entry IDs use the standard-library UUIDv7 implementation to support ordering introduced in Python 3.14. Redis-backed queues require Redis 7 or later. The application requires FCALL permission, and the deployment `redis_lua_lib` management command requires Function-library deployment permissions. While compatible keys are used for forward compatibility, Redis Cluster is not currently supported.
 
 ## Choose a queue type
 
