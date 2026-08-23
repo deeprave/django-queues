@@ -1,0 +1,33 @@
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/test-and-build"
+    schedule:
+      interval: "daily"
+    groups:
+      github-actions-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+      github-actions-security:
+        applies-to: "security-updates"
+        patterns:
+          - "*"
+
+  - package-ecosystem: "uv"
+    directories:
+      - "/"
+      - "/demo_aq"
+      - "/demo_eq"
+      - "/demo_pq"
+    schedule:
+      interval: "daily"
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
