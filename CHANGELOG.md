@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.2.0 - 2026-08-23
 
 - ⚠️ **BREAKING CHANGE:** Redis-backed queues now require the bundled `django_queues` Redis Function library to be deployed before applications start. Deploy it with `python manage.py redis_lua_lib --deploy` using a credential with Redis Function-management permission; applications fail clearly when the library is absent, incompatible, or FCALL is denied. Redis 7 or later is now required for Redis-backed queues.
 - ⚠️ **BREAKING CHANGE:** Redis queue keys now use a Cluster hash-tagged alias. Existing Redis queue state is not compatible with this key layout.
