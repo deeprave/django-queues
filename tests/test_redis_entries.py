@@ -185,6 +185,33 @@ def test_redis_dequeue_promotes_due_scheduled_entry(redis_entry_queue):
     assert dequeued_id == entry_id
 
 
+def test_concurrent_redis_dequeue_delivers_a_due_scheduled_entry_once(redis_client):
+    async def exercise():
+        queue_name = f"concurrent-dequeue-{uuid4().hex}"
+        first = RedisAsyncQueue(redis_client, queue_name=queue_name)
+        second = RedisAsyncQueue(redis_client, queue_name=queue_name)
+        try:
+            now = await first.clock.anow()
+            entry_id = await first.aenqueue("due", available_at=now + 60)
+            await first._provider._async_redis().zadd(
+                first._provider._entry_scheduled_name, {str(entry_id): 0}
+            )
+            results = await asyncio.gather(
+                first.adequeue(), second.adequeue(), return_exceptions=True
+            )
+            return entry_id, results
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+    entry_id, results = asyncio.run(exercise())
+
+    assert [result.id for result in results if not isinstance(result, Exception)] == [
+        entry_id
+    ]
+    assert sum(isinstance(result, QueueEmptyException) for result in results) == 1
+
+
 def test_redis_priority_claim_promotes_due_work_by_priority(redis_client):
     queue = RedisAsyncPriorityQueue(redis_client, queue_name=f"priority-{uuid4().hex}")
 
@@ -241,6 +268,35 @@ def test_redis_priority_dequeue_promotes_due_scheduled_work(redis_client):
     entry_id, dequeued_id = asyncio.run(exercise())
 
     assert dequeued_id == entry_id
+
+
+def test_concurrent_redis_priority_dequeue_delivers_a_due_scheduled_entry_once(
+    redis_client,
+):
+    async def exercise():
+        queue_name = f"concurrent-priority-dequeue-{uuid4().hex}"
+        first = RedisAsyncPriorityQueue(redis_client, queue_name=queue_name)
+        second = RedisAsyncPriorityQueue(redis_client, queue_name=queue_name)
+        try:
+            now = await first.clock.anow()
+            entry_id = await first.aenqueue("due", priority=10, available_at=now + 60)
+            await first._provider._async_redis().zadd(
+                first._provider._entry_scheduled_name, {str(entry_id): 0}
+            )
+            results = await asyncio.gather(
+                first.adequeue(), second.adequeue(), return_exceptions=True
+            )
+            return entry_id, results
+        finally:
+            await first.aclose()
+            await second.aclose()
+
+    entry_id, results = asyncio.run(exercise())
+
+    assert [result.id for result in results if not isinstance(result, Exception)] == [
+        entry_id
+    ]
+    assert sum(isinstance(result, QueueEmptyException) for result in results) == 1
 
 
 def test_raw_values_and_retained_entries_are_independent(redis_entry_queue):

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import math
+import string
 import threading
 from collections.abc import Mapping
 
@@ -44,7 +45,7 @@ __all__ = (
 
 
 DEFAULT_QUEUE_ALIAS = "default"
-_FORBIDDEN_QUEUE_ALIAS_CHARACTERS = frozenset("*?[]")
+_QUEUE_ALIAS_CHARACTERS = frozenset(string.ascii_letters + string.digits + "_-")
 
 
 class QueueRegistry(BaseConnectionHandler):
@@ -70,11 +71,9 @@ class QueueRegistry(BaseConnectionHandler):
                 raise InvalidQueueBackendError(
                     f"Queue alias {alias!r} must be a non-empty string"
                 )
-            if any(
-                character in alias for character in _FORBIDDEN_QUEUE_ALIAS_CHARACTERS
-            ):
+            if any(character not in _QUEUE_ALIAS_CHARACTERS for character in alias):
                 raise InvalidQueueBackendError(
-                    f"Queue alias '{alias}' cannot contain *, ?, [, or ]"
+                    f"Queue alias '{alias}' must contain only ASCII letters, digits, _, or -"
                 )
             if not isinstance(options, Mapping):
                 raise InvalidQueueBackendError(

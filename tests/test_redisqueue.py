@@ -32,6 +32,14 @@ def test_uses_a_redis_specific_default_worker():
     assert queue.resolve_worker("tasks") is RedisAsyncQueueWorker
 
 
+def test_uses_one_resolved_queue_hash_tag_for_all_redis_keys():
+    queue = RedisAsyncQueue("redis://localhost:6379/0", queue_name="email-outbound")
+
+    assert queue.queue_name == "email-outbound"
+    assert queue._provider._entry_pending_name == "{email-outbound}:entries:pending"
+    assert queue._provider._entry_key("entry-id") == "{email-outbound}:entries:entry-id"
+
+
 def test_rejects_the_generic_worker_for_a_redis_queue(redis_url):
     queue = RedisAsyncQueue(redis_url, queue_name="test-worker-type")
 

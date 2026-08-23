@@ -62,6 +62,9 @@ try:
         async def _apromote_scheduled(self) -> None:
             await self._provider.apromote_scheduled()
 
+        async def _apop(self) -> QueueEntry:
+            return await self._provider.apop_scheduled()
+
         async def _astore_and_discard(self, entry: QueueEntry) -> None:
             await self._provider.astore_and_discard(entry)
 
@@ -71,10 +74,9 @@ try:
             """Claim the next entry for `RedisAsyncQueueWorker`'s delivery lease.
 
             `RedisAsyncPriorityQueue` overrides this (and `aclaim_unexpired`)
-            to claim from its own priority-ordered pending store instead --
-            `_CLAIM_SCRIPT`, which this default uses, only ever looks at the
-            plain pending list, so it can never see an entry a priority
-            backend pushed via `apush_priority`.
+            to claim from its own priority-ordered pending store instead: the
+            default FIFO Function only looks at the plain pending list, so it
+            cannot see an entry a priority backend pushed via `apush_priority`.
             """
             return await self._provider.aclaim(worker_id, lease_seconds)
 
@@ -88,8 +90,8 @@ try:
 
             `RedisAsyncPriorityQueue` overrides this to redeliver a
             recovered entry via its priority score instead of the plain
-            pending list -- `_RECOVER_SCRIPT`, which this default uses,
-            always redelivers to the plain list.
+            pending list; the default Function always redelivers to the plain
+            list.
             """
             return await self._provider.arecover(batch_size)
 
@@ -99,12 +101,10 @@ try:
             """Release a claim back for redelivery, e.g. after a lost race.
 
             `RedisAsyncPriorityQueue` overrides this to redeliver via the
-            priority ZSET instead of the plain delayed set -- `_RELEASE_SCRIPT`,
-            which this default uses, always parks the released entry on the
-            plain delayed set, which `_CLAIM_SCRIPT_WITH_PRIORITY` promotes
-            onto the plain pending list and claims from before ever checking
-            the priority ZSET, letting a released entry jump ahead of a
-            genuinely higher-priority one still waiting.
+            priority ZSET instead of the plain delayed set. The default
+            Function parks the released entry on the plain delayed set, which
+            priority claim considers before the priority ZSET; that could let
+            a released low-priority entry jump ahead of higher-priority work.
             """
             return await self._provider.arelease(entry_id, worker_id, delay_seconds)
 

@@ -401,6 +401,17 @@ class TestConfiguredQueueInitialization:
             django_queue.initialise_queues(handler)
 
     @pytest.mark.parametrize(
+        "alias", ["email:outbound", "email.queue", "email{", "email}"]
+    )
+    def test_rejects_queue_aliases_that_are_not_key_namespace_segments(self, alias):
+        handler = django_queue.QueueRegistry(
+            {alias: {"BACKEND": "django_queue.backends.MemoryAsyncQueue"}}
+        )
+
+        with pytest.raises(InvalidQueueBackendError, match="letters, digits, _, or -"):
+            django_queue.initialise_queues(handler)
+
+    @pytest.mark.parametrize(
         ("backend", "message"),
         [
             (

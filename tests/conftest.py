@@ -18,7 +18,7 @@ try:
             pytest.skip(f"Docker is unavailable for Redis integration tests: {exc}")
 
     @pytest.fixture(scope="module")
-    def redis_client(redis_container):
+    def redis_client(redis_container, redis_function_library):
         return (
             f"redis://{redis_container.get_container_host_ip()}:"
             f"{redis_container.get_exposed_port(6379)}/0"
@@ -32,6 +32,12 @@ try:
         )
 
     @pytest.fixture(scope="module")
+    def redis_function_library(redis_raw_client):
+        from django_queue.backends.redis.functions import load_function_library
+
+        redis_raw_client.function_load(load_function_library().source, replace=True)
+
+    @pytest.fixture(scope="module")
     def redis_url(redis_client):
         return redis_client
 
@@ -41,7 +47,8 @@ except ImportError:
 
 @pytest.fixture
 def no_runtime_startup(monkeypatch):
-    """Suppress queue_runtime auto-start via ready()/QueueRegistry.create_connection."""
+    """Suppress queue_runtime auto-start via ready()/QueueRegistry.create_connection.
+    Prevents thread leaks during tests."""
     from django_queue.queue_runtime import queue_runtime
 
     monkeypatch.setattr(queue_runtime, "start_thread", lambda: None)

@@ -64,8 +64,7 @@ try:
             await self._provider.apromote_scheduled_priority()
 
         async def _apop(self):
-            await self._apromote_scheduled()
-            return await self._provider.apop_priority()
+            return await self._provider.apop_scheduled_priority()
 
         async def _adiscard(self, entry_id) -> None:
             await self._provider.adiscard_priority(entry_id)
