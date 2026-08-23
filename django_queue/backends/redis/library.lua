@@ -42,7 +42,7 @@ local function promote_one_scheduled(scheduled_key, entry_key_prefix, pending_ke
         local raw_entry = redis.call('GET', entry_key_prefix .. entry_id)
         local ok, entry = pcall(cjson.decode, raw_entry)
         if ok and type(entry) == 'table' and entry.status == 'queued' then
-            if stack then redis.call('LPUSH', pending_key, entry_id)
+            if stack then redis.call('RPUSH', pending_key, entry_id)
             else redis.call('RPUSH', pending_key, entry_id) end
             redis.call('ZREM', scheduled_key, entry_id)
             return
@@ -83,7 +83,7 @@ end)
 register_function('django_queue_store_and_push', 'Keys: entry record, pending list. Args: entry JSON, stack flag, entry ID. Returns: no value.', function(keys, args)
     redis.call('SET', keys[1], args[1])
     if args[2] == '1' then
-        redis.call('LPUSH', keys[2], args[3])
+        redis.call('RPUSH', keys[2], args[3])
     else
         redis.call('RPUSH', keys[2], args[3])
     end
@@ -153,7 +153,7 @@ register_function('django_queue_store_available', 'Keys: entry record, pending l
     elseif args[5] == '1' then
         push_priority(keys[4], keys[5], tonumber(args[4]), args[2])
     elseif args[6] == '1' then
-        redis.call('LPUSH', keys[2], args[2])
+        redis.call('RPUSH', keys[2], args[2])
     else
         redis.call('RPUSH', keys[2], args[2])
     end
@@ -173,7 +173,7 @@ register_function('django_queue_store_event_and_push', 'Keys: entry record, uncl
     redis.call('SET', keys[1], args[1])
     redis.call('ZADD', keys[2], args[4], args[3])
     if args[2] == '1' then
-        redis.call('LPUSH', keys[3], args[3])
+        redis.call('RPUSH', keys[3], args[3])
     else
         redis.call('RPUSH', keys[3], args[3])
     end
@@ -184,7 +184,7 @@ register_function('django_queue_dequeue_event', 'Keys: pending list, delayed ZSE
     local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])
     local delayed = redis.call('ZRANGEBYSCORE', keys[2], '-inf', now_us)
     for index = 1, #delayed do
-        if args[1] == '1' then redis.call('LPUSH', keys[1], delayed[index])
+        if args[1] == '1' then redis.call('RPUSH', keys[1], delayed[index])
         else redis.call('RPUSH', keys[1], delayed[index]) end
         redis.call('ZREM', keys[2], delayed[index])
     end
@@ -416,7 +416,7 @@ redis.register_function{
                     if type(claim.unclaimed_remaining_us) == 'number' then
                         redis.call('ZADD', keys[5], deadline + claim.unclaimed_remaining_us, entry_id)
                     end
-                    if args[1] == '1' then redis.call('LPUSH', keys[3], entry_id)
+                    if args[1] == '1' then redis.call('RPUSH', keys[3], entry_id)
                     else redis.call('RPUSH', keys[3], entry_id) end
                     recovered = recovered + 1
                 else
@@ -486,7 +486,7 @@ redis.register_function{
         promote_one_scheduled(keys[7], keys[5], keys[1], args[3] == '1', now_us)
         local delayed = redis.call('ZRANGEBYSCORE', keys[2], '-inf', now_us)
         for index = 1, #delayed do
-            if args[3] == '1' then redis.call('LPUSH', keys[1], delayed[index])
+            if args[3] == '1' then redis.call('RPUSH', keys[1], delayed[index])
             else redis.call('RPUSH', keys[1], delayed[index]) end
             redis.call('ZREM', keys[2], delayed[index])
         end

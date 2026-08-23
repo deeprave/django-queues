@@ -30,7 +30,12 @@ class Command(BaseCommand):
         if not urls:
             raise CommandError("No Redis queue URLs are configured.")
         for url in urls:
-            client = redis.Redis.from_url(url)
+            try:
+                client = redis.Redis.from_url(url)
+            except (redis.RedisError, ValueError) as exc:
+                raise CommandError(
+                    f"Redis Function compatibility check failed: {exc}"
+                ) from exc
             try:
                 result = client.fcall("django_queue_info", 0)
                 library_version, api_version = read_library_info(result)

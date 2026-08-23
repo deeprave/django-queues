@@ -367,6 +367,32 @@ def test_compat_rejects_an_incompatible_function_api(monkeypatch):
     assert client.closed is True
 
 
+@pytest.mark.parametrize(
+    "result",
+    [
+        [b"260822_160000", True],
+        [b"\xff", 1],
+    ],
+)
+def test_compat_rejects_invalid_function_introspection_data(monkeypatch, result):
+    """Reject malformed Function metadata instead of reporting compatibility."""
+
+    class RedisClient:
+        def fcall(self, function, numkeys):
+            return result
+
+        def close(self):
+            self.closed = True
+
+    client = RedisClient()
+    monkeypatch.setattr("redis.Redis.from_url", lambda url: client)
+
+    with pytest.raises(CommandError, match="invalid introspection data"):
+        CompatCommand(stdout=StringIO()).handle(redis_url="redis://override/0")
+
+    assert client.closed is True
+
+
 def test_compat_reports_a_denied_function_call(monkeypatch):
     class RedisClient:
         def fcall(self, function, numkeys):
@@ -382,3 +408,36 @@ def test_compat_reports_a_denied_function_call(monkeypatch):
         CompatCommand(stdout=StringIO()).handle(redis_url="redis://override/0")
 
     assert client.closed is True
+
+
+def test_libcheck_wraps_an_invalid_redis_url(monkeypatch):
+    """Catch a client-construction error at the command boundary."""
+
+    def reject_url(url):
+        raise ValueError("Invalid Redis URL")
+
+    monkeypatch.setattr("redis.Redis.from_url", reject_url)
+
+    with pytest.raises(
+        CommandError, match="Redis Function check failed: Invalid Redis URL"
+    ) as error:
+        Command(stdout=StringIO()).handle(deploy=False, redis_url="not-a-redis-url")
+
+    assert isinstance(error.value.__cause__, ValueError)
+
+
+def test_compat_wraps_an_invalid_redis_url(monkeypatch):
+    """Catch a client-construction error at the command boundary."""
+
+    def reject_url(url):
+        raise ValueError("Invalid Redis URL")
+
+    monkeypatch.setattr("redis.Redis.from_url", reject_url)
+
+    with pytest.raises(
+        CommandError,
+        match="Redis Function compatibility check failed: Invalid Redis URL",
+    ) as error:
+        CompatCommand(stdout=StringIO()).handle(redis_url="not-a-redis-url")
+
+    assert isinstance(error.value.__cause__, ValueError)

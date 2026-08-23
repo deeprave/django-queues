@@ -75,6 +75,11 @@ application or worker that uses Redis-backed queues starts:
 python manage.py redis_lua_lib --deploy
 ```
 
+The deployment credential needs permission to inspect and load Redis Function
+libraries, and to acquire and release the command's short-lived deployment
+lease (`SET`, `EVAL`, and the scripted `GET`/`DEL` release). Application
+credentials need only the Function calls required by normal queue operation.
+
 The command derives and deduplicates its Redis targets from `QUEUES`. Its
 exceptional `--redis-url` option deploys to only that URL, but avoid it where
 possible because command-line URLs can expose credentials through shell

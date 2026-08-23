@@ -3,6 +3,7 @@
 ## Unreleased
 
 - ⚠️ **BREAKING CHANGE:** Redis-backed queues now require the bundled `django_queues` Redis Function library to be deployed before applications start. Deploy it with `python manage.py redis_lua_lib --deploy` using a credential with Redis Function-management permission; applications fail clearly when the library is absent, incompatible, or FCALL is denied. Redis 7 or later is now required for Redis-backed queues.
+- ⚠️ **BREAKING CHANGE:** Redis queue keys now use a Cluster hash-tagged alias. Existing Redis queue state is not compatible with this key layout.
 - Replaced the Redis provider's per-client EVALSHA scripts with a shared, versioned Redis Function library. Atomic queue operations now reuse common server-side scheduling and priority helpers.
 - Added `redis_lua_lib` for deployment-role library checks and explicit deployment, and `redis_lua_compat` for application-role FCALL compatibility checks. `--redis-url` is available as an exceptional single-target override; otherwise both commands use configured Redis queue locations.
 - Redis queue keys now share a queue-alias Cluster hash tag. Queue aliases must contain only ASCII letters, digits, `_`, or `-`.

@@ -16,8 +16,17 @@ def read_library_info(result: object) -> tuple[str, int]:
         )
     library_version, api_version = result
     if isinstance(library_version, bytes):
-        library_version = library_version.decode("ascii")
-    if not isinstance(library_version, str) or not isinstance(api_version, int):
+        try:
+            library_version = library_version.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise CommandError(
+                "Redis Function library returned invalid introspection data."
+            ) from exc
+    if (
+        not isinstance(library_version, str)
+        or isinstance(api_version, bool)
+        or not isinstance(api_version, int)
+    ):
         raise CommandError(
             "Redis Function library returned invalid introspection data."
         )

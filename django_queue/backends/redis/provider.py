@@ -18,6 +18,7 @@ import redis
 import redis.asyncio as async_redis
 from asgiref.sync import async_to_sync
 
+from django_queue.aliases import validate_queue_alias
 from django_queue.backends.exceptions import (
     InvalidQueueBackendError,
     QueueClaimConflictError,
@@ -157,7 +158,9 @@ class QueueProviderRedis:
             )
         self._redis_url = redis_url
         self.entry_class = entry_class
-        self._queue_alias = options.get("queue_name", f"queue_{uuid.uuid4().hex}")
+        self._queue_alias = validate_queue_alias(
+            options.get("queue_name", f"queue_{uuid.uuid4().hex}")
+        )
         self._queue_name = f"{{{self._queue_alias}}}"
         self._stack = bool(options.get("stack", False))
         self._maxsize = options.get("maxsize", 0)

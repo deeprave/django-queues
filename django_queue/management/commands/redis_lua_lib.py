@@ -65,7 +65,10 @@ class Command(BaseCommand):
             raise CommandError("No Redis queue URLs are configured.")
         library = load_function_library()
         for url in urls:
-            client = redis.Redis.from_url(url)
+            try:
+                client = redis.Redis.from_url(url)
+            except (redis.RedisError, ValueError) as exc:
+                raise CommandError(f"Redis Function check failed: {exc}") from exc
             try:
                 if deploy:
                     with _deployment_lease(client):

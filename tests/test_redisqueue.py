@@ -40,6 +40,11 @@ def test_uses_one_resolved_queue_hash_tag_for_all_redis_keys():
     assert queue._provider._entry_key("entry-id") == "{email-outbound}:entries:entry-id"
 
 
+def test_rejects_an_invalid_direct_redis_queue_alias():
+    with pytest.raises(InvalidQueueBackendError, match="letters, digits, _, or -"):
+        RedisAsyncQueue("redis://localhost:6379/0", queue_name="email}")
+
+
 def test_rejects_the_generic_worker_for_a_redis_queue(redis_url):
     queue = RedisAsyncQueue(redis_url, queue_name="test-worker-type")
 
