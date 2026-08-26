@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import inspect
 import json
 import logging
 import uuid
@@ -17,6 +18,7 @@ from typing import Any
 import redis
 import redis.asyncio as async_redis
 from asgiref.sync import async_to_sync
+from redis.asyncio.cluster import RedisCluster as AsyncRedisCluster
 
 from django_queue.aliases import validate_queue_alias
 from django_queue.backends.exceptions import (
@@ -184,6 +186,26 @@ class QueueProviderRedis:
         self._clocks_by_loop: dict[asyncio.AbstractEventLoop, RedisQueueClock] = {}
         self._clock: QueueClock = _RedisClockFacade(self)
 
+    def _create_async_client(self) -> Any:
+        return async_redis.from_url(self._redis_url)
+
+    def _function_info_keys(self) -> tuple[str, ...]:
+        return ()
+
+    async def _aclose_client(self, client: Any) -> None:
+        try:
+            await client.aclose(close_connection_pool=True)
+        except TypeError:
+            await client.aclose()
+
+    async def _prepare_async_client(self, client: Any) -> Any:
+        initialize = getattr(client, "initialize", None)
+        if callable(initialize):
+            result = initialize()
+            if inspect.isawaitable(result):
+                await result
+        return client
+
     @property
     def clock(self) -> QueueClock:
         return self._clock
@@ -332,7 +354,7 @@ class QueueProviderRedis:
         loop = asyncio.get_running_loop()
         if client := self._async_redis_by_loop.get(loop):
             return client
-        client = async_redis.from_url(self._redis_url)
+        client = self._create_async_client()
         self._async_redis_by_loop[loop] = client
         return client
 
@@ -341,7 +363,10 @@ class QueueProviderRedis:
         if loop in self._function_compatibility_by_loop:
             return
         try:
-            result = await self._async_redis().fcall("django_queue_info", 0)
+            keys = self._function_info_keys()
+            result = await self._async_redis().fcall(
+                "django_queue_info", len(keys), *keys
+            )
         except redis.RedisError as exc:
             raise InvalidQueueBackendError(
                 "Redis Function library is unavailable or FCALL is denied; run "
@@ -381,7 +406,7 @@ class QueueProviderRedis:
 
     async def aobserve(self, on_snapshot) -> None:
         """Receive and decode lifecycle snapshots through provider-owned Pub/Sub."""
-        client = async_redis.from_url(self._redis_url)
+        client = await self._prepare_async_client(self._create_async_client())
         pubsub = client.pubsub(ignore_subscribe_messages=True)
         try:
             await pubsub.subscribe(self.lifecycle_channel)
@@ -399,7 +424,7 @@ class QueueProviderRedis:
                 on_snapshot(entry)
         finally:
             await pubsub.aclose()
-            await client.aclose()
+            await self._aclose_client(client)
 
     async def apublish(self, entry: QueueEntry) -> None:
         await self._async_redis().publish(
@@ -1094,4 +1119,46 @@ class QueueProviderRedis:
         if clock := self._clocks_by_loop.pop(loop, None):
             await clock.aclose()
         if client := self._async_redis_by_loop.pop(loop, None):
-            await client.aclose(close_connection_pool=True)
+            await self._aclose_client(client)
+
+
+class QueueProviderRedisCluster(QueueProviderRedis):
+    """Redis Cluster provider using redis-py's asyncio Cluster client.
+
+    Queue operations stay on :class:`QueueProviderRedis`. This subclass only
+    constructs and closes a Cluster client, rejects a non-zero database, and
+    routes Function introspection to the queue's hash slot.
+    """
+
+    def __init__(
+        self,
+        redis_url: str,
+        options: dict | None = None,
+        *,
+        entry_class: type[QueueEntry],
+        **kwargs,
+    ) -> None:
+        options = {} if options is None else options
+        options = dict(options) | kwargs
+        address_remap = options.pop("address_remap", None)
+        super().__init__(redis_url, options, entry_class=entry_class)
+        self._address_remap = address_remap
+        try:
+            connection_kwargs = redis.connection.parse_url(self._redis_url)
+        except (AttributeError, ValueError) as exc:
+            raise InvalidQueueBackendError(f"Redis URL is invalid: {exc}") from exc
+        database = int(connection_kwargs.get("db") or 0)
+        if database != 0:
+            raise InvalidQueueBackendError(
+                "Redis Cluster queues require database 0; "
+                f"the configured seed URL selects database {database}"
+            )
+
+    def _create_async_client(self) -> Any:
+        kwargs: dict[str, Any] = {}
+        if self._address_remap is not None:
+            kwargs["address_remap"] = self._address_remap
+        return AsyncRedisCluster.from_url(self._redis_url, **kwargs)
+
+    def _function_info_keys(self) -> tuple[str, ...]:
+        return (self._queue_name,)

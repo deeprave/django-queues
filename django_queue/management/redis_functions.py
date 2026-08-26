@@ -2,10 +2,76 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
+from typing import Any, cast
+from urllib.parse import urlsplit, urlunsplit
 
+import redis
 from django.core.management.base import CommandError
 from django.utils.module_loading import import_string
+from redis.crc import key_slot
+
+REDIS_TOPOLOGY_STANDALONE = "standalone"
+REDIS_TOPOLOGY_CLUSTER = "cluster"
+DEPLOYMENT_LOCK_KEY = "django_queues:function-deploy-lock"
+
+_CLUSTER_NODE_ID = re.compile(r"^[0-9a-fA-F]{40}$")
+_PRIMARY_CLIENT_OMIT = frozenset({"host", "port", "redis_connect_func"})
+
+
+@dataclass(frozen=True, slots=True)
+class RedisFunctionTarget:
+    """A unique Redis Function-library deployment or compatibility target."""
+
+    url: str
+    topology: str
+    aliases: tuple[str, ...] = ()
+    address_remap: Callable[[tuple[str, int]], tuple[str, int]] | None = None
+
+
+def redact_redis_url(url: str) -> str:
+    """Return *url* without username or password userinfo."""
+    parsed = urlsplit(url)
+    if parsed.username is None and parsed.password is None:
+        return url
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if parsed.port is not None:
+        netloc = f"{hostname}:{parsed.port}"
+    return urlunsplit(
+        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+    )
+
+
+def warn_duplicate_cluster_seeds(
+    cluster_identities: list[tuple[str, frozenset[str]]],
+    write: Callable[[str], object],
+) -> None:
+    """Warn when distinct seed URLs discovered the same CLUSTER NODES ids."""
+    seen: dict[frozenset[str], list[str]] = {}
+    for url, node_ids in cluster_identities:
+        if not node_ids:
+            continue
+        seen.setdefault(node_ids, []).append(url)
+    for urls in seen.values():
+        if len(urls) > 1:
+            listed = ", ".join(redact_redis_url(url) for url in urls)
+            write(
+                "Warning: distinct Cluster seed URLs discovered the same "
+                f"Redis Cluster node ids: {listed}."
+            )
+
+
+def cluster_from_url_kwargs(target: RedisFunctionTarget) -> dict[str, Any]:
+    """Keyword arguments ``RedisCluster.from_url`` needs for this target."""
+    kwargs: dict[str, object] = {}
+    if target.address_remap is not None:
+        kwargs["address_remap"] = target.address_remap
+    return kwargs
 
 
 def read_library_info(result: object) -> tuple[str, int]:
@@ -33,12 +99,28 @@ def read_library_info(result: object) -> tuple[str, int]:
     return library_version, api_version
 
 
+def _mapping_from_redis(value: object) -> Mapping[object, object] | None:
+    """Normalise a Redis hash-like value to a mapping.
+
+    FUNCTION LIST may return a dict (RESP3) or a flattened list of pairs
+    (RESP2), depending on the client connection.
+    """
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, list) and len(value) >= 2 and len(value) % 2 == 0:
+        mapping: dict[object, object] = {}
+        for index in range(0, len(value), 2):
+            mapping[value[index]] = value[index + 1]
+        return mapping
+    return None
+
+
 def read_installed_library_info(libraries: object) -> tuple[str, int]:
     """Read version metadata from a ``FUNCTION LIST WITHCODE`` response."""
     if not isinstance(libraries, list) or len(libraries) != 1:
         raise CommandError("Redis Function library returned invalid library metadata.")
-    library = libraries[0]
-    if not isinstance(library, Mapping):
+    library = _mapping_from_redis(libraries[0])
+    if library is None:
         raise CommandError("Redis Function library returned invalid library metadata.")
     source = library.get("library_code", library.get(b"library_code"))
     if isinstance(source, str):
@@ -65,14 +147,27 @@ def read_installed_library_info(libraries: object) -> tuple[str, int]:
     return library_version, api_version
 
 
-def resolve_redis_urls(
-    queue_settings: Mapping[str, Mapping[str, object]], *, redis_url: str | None = None
-) -> tuple[str, ...]:
-    """Return the configured Redis targets, unless an explicit override is set."""
+def resolve_redis_targets(
+    queue_settings: Mapping[str, Mapping[str, object]],
+    *,
+    redis_url: str | None = None,
+    redis_cluster_url: str | None = None,
+) -> tuple[RedisFunctionTarget, ...]:
+    """Return configured Redis targets, unless an explicit override is set."""
+    if redis_url is not None and redis_cluster_url is not None:
+        raise CommandError(
+            "--redis-url and --redis-cluster-url are mutually exclusive."
+        )
     if redis_url is not None:
-        return (redis_url,)
+        return (RedisFunctionTarget(redis_url, REDIS_TOPOLOGY_STANDALONE),)
+    if redis_cluster_url is not None:
+        return (RedisFunctionTarget(redis_cluster_url, REDIS_TOPOLOGY_CLUSTER),)
 
-    urls: dict[str, None] = {}
+    grouped: dict[tuple[str, str], list[str]] = {}
+    remaps: dict[
+        tuple[str, str], Callable[[tuple[str, int]], tuple[str, int]] | None
+    ] = {}
+    order: list[tuple[str, str]] = []
     for alias, options in queue_settings.items():
         backend_path = options.get("BACKEND")
         if not isinstance(backend_path, str):
@@ -90,5 +185,140 @@ def resolve_redis_urls(
         location = options.get("LOCATION")
         if not isinstance(location, str) or not location:
             raise CommandError(f"Redis queue '{alias}' must define a Redis LOCATION.")
-        urls[location] = None
-    return tuple(urls)
+        topology = getattr(backend, "redis_topology", REDIS_TOPOLOGY_STANDALONE)
+        if topology not in (REDIS_TOPOLOGY_STANDALONE, REDIS_TOPOLOGY_CLUSTER):
+            topology = REDIS_TOPOLOGY_STANDALONE
+        key = (topology, location)
+        remap = cast(
+            Callable[[tuple[str, int]], tuple[str, int]] | None,
+            options.get("address_remap")
+            if callable(options.get("address_remap"))
+            else None,
+        )
+        if key not in grouped:
+            grouped[key] = []
+            remaps[key] = remap
+            order.append(key)
+        grouped[key].append(alias)
+        if remaps[key] is None and remap is not None:
+            remaps[key] = remap
+    return tuple(
+        RedisFunctionTarget(
+            url,
+            topology,
+            tuple(grouped[(topology, url)]),
+            remaps[(topology, url)],
+        )
+        for topology, url in order
+    )
+
+
+def resolve_redis_urls(
+    queue_settings: Mapping[str, Mapping[str, object]],
+    *,
+    redis_url: str | None = None,
+    redis_cluster_url: str | None = None,
+) -> tuple[str, ...]:
+    """Return the configured Redis target URLs, unless an explicit override is set."""
+    return tuple(
+        target.url
+        for target in resolve_redis_targets(
+            queue_settings,
+            redis_url=redis_url,
+            redis_cluster_url=redis_cluster_url,
+        )
+    )
+
+
+def parse_cluster_node_ids(nodes: object) -> frozenset[str]:
+    """Extract 40-character CLUSTER NODES ids from a client response."""
+    if isinstance(nodes, bytes):
+        try:
+            nodes = nodes.decode("utf-8")
+        except UnicodeDecodeError:
+            return frozenset()
+    if isinstance(nodes, str):
+        ids: set[str] = set()
+        for line in nodes.splitlines():
+            first = line.split(maxsplit=1)[0] if line.strip() else ""
+            if _CLUSTER_NODE_ID.fullmatch(first):
+                ids.add(first.lower())
+        return frozenset(ids)
+    if isinstance(nodes, Mapping):
+        ids = set()
+        for key, detail in nodes.items():
+            candidates: list[object] = [key]
+            if isinstance(detail, Mapping):
+                candidates.extend(
+                    detail.get(field)
+                    for field in ("node_id", "id", "name", b"node_id", b"id", b"name")
+                )
+            for candidate in candidates:
+                if isinstance(candidate, bytes):
+                    try:
+                        candidate = candidate.decode("ascii")
+                    except UnicodeDecodeError:
+                        continue
+                if isinstance(candidate, str) and _CLUSTER_NODE_ID.fullmatch(candidate):
+                    ids.add(candidate.lower())
+        return frozenset(ids)
+    return frozenset()
+
+
+def cluster_node_ids(client) -> frozenset[str]:
+    """Return CLUSTER NODES ids discovered by a sync Cluster client."""
+    return parse_cluster_node_ids(client.execute_command("CLUSTER NODES"))
+
+
+def iter_cluster_primary_clients(
+    cluster,
+) -> Iterator[tuple[redis.Redis, str, object]]:
+    """Yield ``(client, advertised host:port, primary node)`` for each primary."""
+    manager = getattr(cluster, "nodes_manager", None)
+    if manager is not None:
+        initialize = getattr(manager, "initialize", None)
+        slots = getattr(manager, "slots_cache", None)
+        if initialize is not None and not slots:
+            initialize()
+    remap = getattr(manager, "remap_host_port", None)
+    stored = getattr(manager, "connection_kwargs", None)
+    connection_kwargs = (
+        {key: value for key, value in stored.items() if key not in _PRIMARY_CLIENT_OMIT}
+        if isinstance(stored, Mapping)
+        else {}
+    )
+    for node in cluster.get_primaries():
+        host, port = node.host, int(node.port)
+        advertised = f"{host}:{port}"
+        if remap is not None:
+            host, port = remap(host, port)
+        yield redis.Redis(host=host, port=port, **connection_kwargs), advertised, node
+
+
+def deployment_lock_key(cluster, node) -> str:
+    """Return a lock key that hashes to a slot owned by *node* when possible."""
+    manager = getattr(cluster, "nodes_manager", None)
+    slots_cache = getattr(manager, "slots_cache", None) if manager else None
+    if not slots_cache:
+        return DEPLOYMENT_LOCK_KEY
+    node_name = getattr(node, "name", None) or f"{node.host}:{node.port}"
+    slot = None
+    for candidate, owners in slots_cache.items():
+        if not owners:
+            continue
+        owner = owners[0]
+        owner_name = getattr(owner, "name", None) or f"{owner.host}:{owner.port}"
+        if owner is node or owner_name == node_name:
+            slot = candidate
+            break
+    if slot is None:
+        return DEPLOYMENT_LOCK_KEY
+    return _lock_key_for_slot(slot)
+
+
+def _lock_key_for_slot(slot: int) -> str:
+    for index in range(1_000_000):
+        tag = str(index)
+        if key_slot(f"{{{tag}}}".encode()) == slot:
+            return f"{{{tag}}}:function-deploy-lock"
+    raise CommandError(f"Unable to place a deployment lock in hash slot {slot}.")

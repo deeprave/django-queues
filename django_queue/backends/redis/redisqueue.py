@@ -15,6 +15,8 @@ try:
         requires_entry_class_at_construction = True
         worker_provider_kind = "redis"
         worker_provider_type = "redis"
+        redis_topology = "standalone"
+        provider_class = QueueProviderRedis
         worker_class = "django_queue.backends.redis.RedisAsyncQueueWorker"
         compatible_worker_class = "django_queue.backends.redis.RedisAsyncQueueWorker"
 
@@ -22,7 +24,7 @@ try:
             options = {} if options is None else options
             options |= kwargs
             self.entry_class = options.pop("entry_class", self.entry_class)
-            self._provider = QueueProviderRedis(
+            self._provider = type(self).provider_class(
                 redis_url, options, entry_class=self.entry_class
             )
             self._queue_name = self._provider.queue_name

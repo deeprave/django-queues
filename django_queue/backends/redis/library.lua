@@ -1,8 +1,8 @@
 #!lua name=django_queues
--- django-queues-library-version: 260822_160000
+-- django-queues-library-version: 260826_110000
 -- django-queues-api-version: 1
 
-local library_version = "260822_160000"
+local library_version = "260826_110000"
 local api_version = 1
 
 local function register_function(name, description, callback)
@@ -76,7 +76,7 @@ local function promote_one_scheduled_priority(scheduled_key, entry_key_prefix, p
     end
 end
 
-register_function('django_queue_info', 'Keys: none. Args: none. Returns: library version and API version.', function(keys, args)
+register_function('django_queue_info', 'Keys: none, or one optional queue-owned hash-tagged key to route the call on Redis Cluster. Args: none. Returns: library version and API version.', function(keys, args)
     return {library_version, api_version}
 end)
 

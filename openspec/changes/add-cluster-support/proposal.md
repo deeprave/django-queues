@@ -20,7 +20,8 @@ an accidental single-node connection.
   every current Cluster primary; application compatibility validates that the
   selected Cluster client can invoke it.
 - Document Cluster-specific configuration, required deployment permissions,
-  primary-node deployment, and topology limitations.
+  primary-node deployment, `--redis-url` / `--redis-cluster-url` isolation, and
+  topology limitations.
 
 ## Capabilities
 

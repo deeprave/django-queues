@@ -1,15 +1,38 @@
 import asyncio
 import inspect
 import os
+from pathlib import Path
 
 import pytest
 
 os.environ.setdefault("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
 
+_CLUSTER_IMAGE_DIR = Path(__file__).resolve().parent / "redis-cluster"
+_CLUSTER_PORTS = (7000, 7001, 7002)
+
+
+def redis_cluster_address_remap(container):
+    """Map advertised Cluster node addresses to published host ports."""
+    host = container.get_container_host_ip()
+    published = {port: int(container.get_exposed_port(port)) for port in _CLUSTER_PORTS}
+
+    def remap(address):
+        _advertised_host, advertised_port = address
+        mapped = published.get(int(advertised_port))
+        if mapped is None:
+            return address
+        return host, mapped
+
+    return remap
+
+
 try:
     import redis
     from docker.errors import DockerException
     from testcontainers.community.redis import RedisContainer
+    from testcontainers.core.container import DockerContainer
+    from testcontainers.core.image import DockerImage
+    from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 
     @pytest.fixture(scope="module")
     def redis_container():
@@ -42,6 +65,54 @@ try:
     @pytest.fixture(scope="module")
     def redis_url(redis_client):
         return redis_client
+
+    @pytest.fixture(scope="module")
+    def redis_cluster_container():
+        try:
+            with DockerImage(
+                path=str(_CLUSTER_IMAGE_DIR),
+                tag="django-queues-redis-cluster:test",
+            ) as image:
+                container = (
+                    DockerContainer(str(image))
+                    .with_exposed_ports(*_CLUSTER_PORTS)
+                    .waiting_for(LogMessageWaitStrategy("cluster-ready"))
+                )
+                with container:
+                    yield container
+        except DockerException as exc:
+            pytest.skip(f"Docker is unavailable for Redis Cluster tests: {exc}")
+
+    @pytest.fixture(scope="module")
+    def redis_cluster_url(redis_cluster_container):
+        from django_queue.backends.redis.functions import load_function_library
+
+        remap = redis_cluster_address_remap(redis_cluster_container)
+        host = redis_cluster_container.get_container_host_ip()
+        port = redis_cluster_container.get_exposed_port(7000)
+        url = f"redis://{host}:{port}/0"
+        cluster = redis.cluster.RedisCluster.from_url(url, address_remap=remap)
+        try:
+            library = load_function_library()
+            manager = cluster.nodes_manager
+            if not manager.slots_cache:
+                manager.initialize()
+            for node in cluster.get_primaries():
+                mapped_host, mapped_port = manager.remap_host_port(
+                    node.host, int(node.port)
+                )
+                node_client = redis.Redis(host=mapped_host, port=mapped_port)
+                try:
+                    node_client.function_load(library.source, replace=True)
+                finally:
+                    node_client.close()
+        finally:
+            cluster.close()
+        return url
+
+    @pytest.fixture(scope="module")
+    def redis_cluster_remap(redis_cluster_container):
+        return redis_cluster_address_remap(redis_cluster_container)
 
 except ImportError:
     pass
