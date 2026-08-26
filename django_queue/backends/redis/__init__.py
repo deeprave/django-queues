@@ -5,6 +5,15 @@ except ModuleNotFoundError as exc:
         "Redis queue backends require the 'redis' extra; install django-queues[redis]"
     ) from exc
 
+from .rediscluster import (
+    RedisClusterAsyncPriorityQueue,
+    RedisClusterAsyncPriorityQueueJson,
+    RedisClusterAsyncQueue,
+    RedisClusterAsyncQueueJson,
+    RedisClusterAsyncStack,
+    RedisClusterAsyncStackJson,
+    RedisClusterEventQueue,
+)
 from .rediseventqueue import RedisEventQueue
 from .redispqueue import RedisAsyncPriorityQueue
 from .redispqueuejson import RedisAsyncPriorityQueueJson
@@ -20,6 +29,13 @@ __all__ = (
     "RedisAsyncQueueWorker",
     "RedisAsyncStack",
     "RedisAsyncStackJson",
+    "RedisClusterAsyncPriorityQueue",
+    "RedisClusterAsyncPriorityQueueJson",
+    "RedisClusterAsyncQueue",
+    "RedisClusterAsyncQueueJson",
+    "RedisClusterAsyncStack",
+    "RedisClusterAsyncStackJson",
+    "RedisClusterEventQueue",
     "RedisEventQueue",
     "RedisEventQueueWorker",
 )

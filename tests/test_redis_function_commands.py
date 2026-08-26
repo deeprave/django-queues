@@ -5,14 +5,21 @@ import redis
 from django.core.management.base import CommandError
 
 import django_queue
+from django_queue.backends.redis.functions import FUNCTION_LIBRARY_VERSION
 from django_queue.management.commands.redis_lua_compat import Command as CompatCommand
 from django_queue.management.commands.redis_lua_lib import Command
-from django_queue.management.redis_functions import resolve_redis_urls
+from django_queue.management.redis_functions import (
+    read_installed_library_info,
+    redact_redis_url,
+    resolve_redis_urls,
+)
 
 
 def _installed_library(
-    library_version: str = "260822_160000", api_version: int = 1
+    library_version: str | None = None, api_version: int = 1
 ) -> list[dict[str, str]]:
+    if library_version is None:
+        library_version = FUNCTION_LIBRARY_VERSION
     return [
         {
             "library_name": "django_queues",
@@ -62,6 +69,24 @@ def test_redis_url_override_replaces_configured_targets():
     )
 
     assert urls == ("redis://override/3",)
+
+
+def test_reads_installed_library_info_from_resp2_function_list_pairs():
+    source = (
+        "#!lua name=django_queues\n"
+        "-- django-queues-library-version: 260822_160000\n"
+        "-- django-queues-api-version: 1\n"
+    )
+    libraries = [
+        [
+            b"library_name",
+            b"django_queues",
+            b"library_code",
+            source.encode("utf-8"),
+        ]
+    ]
+
+    assert read_installed_library_info(libraries) == ("260822_160000", 1)
 
 
 def test_libcheck_deploys_the_bundled_library_to_each_configured_target(
@@ -254,7 +279,8 @@ def test_libcheck_reports_installed_versions_and_required_deployment(monkeypatch
         "Redis Function library is installed:\n\n"
         "- django_queues version 260822_150000\n"
         "- api_version 1 (compatible)\n\n"
-        "Bundled library_version: 260822_160000\n"
+        "Bundled library_version: "
+        f"{FUNCTION_LIBRARY_VERSION}\n"
         "Deployment required."
     )
     assert client.closed is True
@@ -278,9 +304,9 @@ def test_libcheck_formats_a_current_library_status(monkeypatch):
 
     assert output.getvalue() == (
         "Redis Function library is installed:\n\n"
-        "- django_queues version 260822_160000\n"
+        f"- django_queues version {FUNCTION_LIBRARY_VERSION}\n"
         "- api_version 1 (compatible)\n\n"
-        "Bundled library_version: 260822_160000\n"
+        f"Bundled library_version: {FUNCTION_LIBRARY_VERSION}\n"
     )
     assert client.closed is True
 
@@ -441,3 +467,15 @@ def test_compat_wraps_an_invalid_redis_url(monkeypatch):
         CompatCommand(stdout=StringIO()).handle(redis_url="not-a-redis-url")
 
     assert isinstance(error.value.__cause__, ValueError)
+
+
+def test_redact_redis_url_strips_userinfo():
+    assert (
+        redact_redis_url("redis://:deploy-secret@10.0.0.1:6379/0")
+        == "redis://10.0.0.1:6379/0"
+    )
+    assert (
+        redact_redis_url("rediss://deploy:s3cret@seed.example:6379/0")
+        == "rediss://seed.example:6379/0"
+    )
+    assert redact_redis_url("redis://localhost:6379/0") == "redis://localhost:6379/0"

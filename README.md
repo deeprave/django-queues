@@ -12,7 +12,7 @@ The current implementation supports both memory-backed and Redis-backed pub/sub 
 
 ## Requirements
 
-`django-queues` requires Python 3.14 or later, as queue entry IDs use the standard-library UUIDv7 implementation to support ordering introduced in Python 3.14. Redis-backed queues require Redis 7 or later. The application requires FCALL permission, and the deployment `redis_lua_lib` management command requires Function-library deployment permissions. While compatible keys are used for forward compatibility, Redis Cluster is not currently supported.
+`django-queues` requires Python 3.14 or later, as queue entry IDs use the standard-library UUIDv7 implementation to support ordering introduced in Python 3.14. Redis-backed queues require Redis 7 or later. The application requires FCALL permission, and the deployment `redis_lua_lib` management command requires Function-library deployment permissions. Redis Cluster is supported through explicit Cluster backend classes; ordinary Redis backends remain standalone.
 
 ## Choose a queue type
 
@@ -20,8 +20,8 @@ Choose the semantic queue type first; choose its memory or Redis backend second.
 
 | Choose | Use it for | Classes | Consumer model | Retention |
 | --- | --- | --- | --- | --- |
-| **Async queue** | Work that runs later and whose progress or outcome must be inspectable | `MemoryAsyncQueue`, `RedisAsyncQueue`, and their stack/priority variants | An async `HANDLER`, normally run by `manage.py runqueues` | A durable lifecycle: `queued`, `running`, then `succeeded`, `failed`, or `timeout` until pruning |
-| **Event queue** | Short-lived notifications delivered to one or more local listeners | `MemoryEventQueue`, `RedisEventQueue` | `@queue_listener`; Django starts the queue runtime once at process startup when at least one queue is configured | Consumed, retried, or expired; no durable outcome record |
+| **Async queue** | Work that runs later and whose progress or outcome must be inspectable | `MemoryAsyncQueue`, `RedisAsyncQueue`, `RedisClusterAsyncQueue`, and their stack/priority variants | An async `HANDLER`, normally run by `manage.py runqueues` | A durable lifecycle: `queued`, `running`, then `succeeded`, `failed`, or `timeout` until pruning |
+| **Event queue** | Short-lived notifications delivered to one or more local listeners | `MemoryEventQueue`, `RedisEventQueue`, `RedisClusterEventQueue` | `@queue_listener`; Django starts the queue runtime once at process startup when at least one queue is configured | Consumed, retried, or expired; no durable outcome record |
 
 Async queues are the correct choice when a producer needs to determine a result, observe lifecycle progress, or retain completed work temporarily.
 
@@ -29,14 +29,17 @@ Event queues are for streaming data in "fan-out" fashion to one or more consumer
 
 ## Backend choices
 
-Currently only two:
+Currently three:
 
 - **Memory** queues exist only while the application process runs. Configured
   `MemoryAsyncQueue` instances are local to the resolving process and thread;
   `MemoryEventQueue` is process-scoped.
-- **Redis** queues are shared and persistent. Use them when producers and
-  consumers run in different processes, containers, or hosts. Install support
-  with `pip install "django-queues[redis]"`.
+- **Redis** queues are shared and persistent on a standalone Redis instance.
+  Use them when producers and consumers run in different processes, containers,
+  or hosts. Install support with `pip install "django-queues[redis]"`.
+- **Redis Cluster** queues are the same Redis queue family on an explicit
+  Cluster topology. Select a `RedisCluster*` backend; ordinary Redis backends
+  do not detect or switch to Cluster mode.
 
 FIFO, LIFO stack, and priority ordering are available for async queues. Event queues use their selected backend's transient delivery semantics.
 
@@ -62,11 +65,29 @@ QUEUES = {
 
 This configures a Redis-backed FIFO async queue with JSON values. Redis-backed queues own their asynchronous connections; application code does not supply Redis client instances.
 
+A Redis Cluster alias uses an explicit Cluster backend and a single seed URL
+on database `0`. The client discovers the remaining topology from that seed:
+
+```python
+QUEUES = {
+    "default": {
+        "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueueJson",
+        "LOCATION": "redis://localhost:6379/0",
+        "maxsize": 64,
+    },
+}
+```
+
+Cluster backends reject any database other than `0`. After a failover or
+scale-out that introduces a new primary, rerun `redis_lua_lib --deploy`
+before application traffic is routed to that node.
+
 ## ⚠️ Required Redis initialisation
 
 > **Redis-backed queues cannot start until the bundled `django_queues` Redis
-> Function library has been installed on every target Redis instance.** This is
-> a required deployment step, not an application-startup responsibility.
+> Function library has been installed on every target Redis instance or
+> Cluster primary.** This is a required deployment step, not an
+> application-startup responsibility.
 
 Run this with a deployment credential after Redis is available and before any
 application or worker that uses Redis-backed queues starts:
@@ -80,12 +101,21 @@ libraries, and to acquire and release the command's short-lived deployment
 lease (`SET`, `EVAL`, and the scripted `GET`/`DEL` release). Application
 credentials need only the Function calls required by normal queue operation.
 
-The command derives and deduplicates its Redis targets from `QUEUES`. Its
-exceptional `--redis-url` option deploys to only that URL, but avoid it where
-possible because command-line URLs can expose credentials through shell
-history. The command without `--deploy` is a non-mutating preflight check; it
-reports the installed library and API versions, and fails if deployment is
-required.
+The command derives and deduplicates its Redis targets from `QUEUES` according
+to each alias's backend topology. For a Cluster backend it discovers the
+current primaries and deploys the bundled library to every primary before
+reporting success. Its exceptional `--redis-url` option is standalone-only:
+it is the sole target and Cluster aliases are not visited. `--redis-cluster-url`
+is Cluster-only: it is the sole seed and standalone aliases are not visited.
+The two options are mutually exclusive. Avoid both where possible because
+command-line URLs can expose credentials through shell history. Distinct
+Cluster seed URLs remain distinct targets even if they name the same Cluster.
+The command without `--deploy` is a non-mutating preflight check; it reports
+the installed library and API versions, and fails if deployment is required.
+Keep `redis_lua_lib` and `redis_lua_compat` as separate commands: managed Redis
+typically grants Function-library management (`FUNCTION LIST` / `FUNCTION LOAD`)
+to a deployment role and application FCALL to a distinct application role.
+`redis_lua_compat` must not require `FUNCTION LIST`.
 
 Then, with the application credential, verify the application can invoke the
 library:
@@ -93,6 +123,10 @@ library:
 ```sh
 python manage.py redis_lua_compat
 ```
+
+On Cluster, `redis_lua_compat` invokes `django_queue_info` on every current
+primary. Application providers still route that same introspection call with a
+queue-owned hash-tagged key so it executes on the slot owner for that queue.
 
 The demo Compose configurations show the intended startup ordering: their
 dashboard service waits for Redis to become healthy, runs
@@ -131,7 +165,7 @@ The alias is the queue's stable application identity. It is the key in
 | Setting | Applies to | Meaning |
 | --- | --- | --- |
 | `BACKEND` | All queues; required | Dotted class path for the queue backend. It selects both the semantic kind (`AsyncQueue` or `EventQueue`) and storage provider. |
-| `LOCATION` | All queues | Backend location. Redis backends require a Redis URL such as `redis://localhost:6379/12`; memory backends ignore it and may omit it. |
+| `LOCATION` | All queues | Backend location. Standalone Redis backends require a Redis URL such as `redis://localhost:6379/12`. Redis Cluster backends require a database-`0` seed URL such as `redis://localhost:6379/0`. Memory backends ignore it and may omit it. |
 | `HANDLER` | Async queues only | Dotted path to the async callable that handles entries. Its presence opts that alias into `manage.py runqueues`; it is not passed to the backend. Event queues reject it because they use listeners. |
 | `WORKER` | Optional | Compatible concrete worker class or dotted class path. Omit it to use the backend's default; Redis and memory workers are provider-specific. |
 | `ENTRY_CLASS` | Optional | `QueueEntry` subclass or dotted class path used for queue entries. It defaults to `QueueEntry`; extra fields must be JSON-serialisable. |
@@ -383,7 +417,7 @@ The worker dispatches one entry at a time and runs until cancelled. On cancellat
 Redis queues use leased claims for at-least-once delivery. A worker claims an
 entry, renews its lease while dispatching, and atomically settles its terminal entry outcome only while it still owns that claim. Expired claims return the same entry ID to pending work, so a process failure can cause the handler to execute more than once. Handlers that make external changes must therefore be idempotent. Queue backends without claim-lease support retain best-effort delivery.
 
-Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery operations, owned by the Redis worker and its private queue provider rather than the public queue API. Other transports may use a different native model. Redis keys, Functions, timestamps, and record layout are not public contract. Redis Cluster is not supported by the Redis delivery implementation.
+Claim, renewal, acknowledgement, recovery, and settlement are Redis delivery operations, owned by the Redis worker and its private queue provider rather than the public queue API. Other transports may use a different native model. Redis keys, Functions, timestamps, and record layout are not public contract. The explicit Redis Cluster backends use the same Redis delivery implementation.
 
 If a terminal outcome cannot be persisted because of an infrastructure failure, the worker logs the failure and continues. When it can still read a `running` entry, it makes one best-effort attempt to record a safe `QueuePersistenceError` failure outcome. If it cannot confirm either terminal outcome, the worker raises `QueuePersistenceError` rather than accepting further entries.
 

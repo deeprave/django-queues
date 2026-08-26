@@ -23,8 +23,8 @@ override for exceptional use; when supplied, that URL SHALL be the sole target.
 
 #### Scenario: Concurrent deployment requests
 - **WHEN** two management-command invocations target the same Redis library
-- **THEN** one invocation performs the replacement and the other rechecks the
-  installed revision before deciding whether further work is needed
+- **THEN** one invocation performs the replacement and the other fails
+  immediately because a deployment is already in progress
 
 ### Requirement: Validate application compatibility without deployment
 Each application release SHALL declare a minimum compatible `api_version`.

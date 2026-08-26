@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Added explicit Redis Cluster backends (`RedisClusterAsyncQueue`, stack, priority, JSON, and `RedisClusterEventQueue`) that route through redis-py's asyncio Cluster client. Cluster `LOCATION` is a single database-0 seed URL; ordinary Redis backends remain standalone.
+- `redis_lua_lib --deploy` installs the Function library on every current Cluster primary. `--redis-url` is standalone-only, `--redis-cluster-url` is Cluster-only, and the flags are mutually exclusive. Rerun deployment after a topology change that introduces a new primary.
+- Cluster Function deployment forwards the seed URL's connection settings to each primary, and management commands redact credentials when they print resolved Redis URLs.
+- On Cluster, `redis_lua_compat` checks `django_queue_info` on every current primary. It remains a separate command from `redis_lua_lib` so application credentials need only FCALL, not Function-library management.
+
 ## v1.2.0 - 2026-08-23
 
 - ⚠️ **BREAKING CHANGE:** Redis-backed queues now require the bundled `django_queues` Redis Function library to be deployed before applications start. Deploy it with `python manage.py redis_lua_lib --deploy` using a credential with Redis Function-management permission; applications fail clearly when the library is absent, incompatible, or FCALL is denied. Redis 7 or later is now required for Redis-backed queues.

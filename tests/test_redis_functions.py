@@ -53,7 +53,10 @@ def test_loads_the_function_library_from_its_package_resource():
     assert library.library_version == FUNCTION_LIBRARY_VERSION
     assert library.api_version == FUNCTION_API_VERSION == 1
     assert library.source.startswith(b"#!lua name=django_queues\n")
-    assert b"register_function('django_queue_info', 'Keys: none." in library.source
+    assert (
+        b"register_function('django_queue_info', 'Keys: none, or one optional"
+        in library.source
+    )
 
 
 def test_rejects_a_bundled_library_resource_with_invalid_metadata(monkeypatch):
