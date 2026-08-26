@@ -469,13 +469,55 @@ def test_compat_wraps_an_invalid_redis_url(monkeypatch):
     assert isinstance(error.value.__cause__, ValueError)
 
 
-def test_redact_redis_url_strips_userinfo():
+def test_libcheck_standalone_command_tls_handshake_failure_is_actionable(monkeypatch):
+    class RedisClient:
+        def function_list(self, *, library, withcode=False):
+            raise redis.ConnectionError("SSL: CERTIFICATE_VERIFY_FAILED")
+
+        def close(self):
+            self.closed = True
+
+    client = RedisClient()
+    monkeypatch.setattr("redis.Redis.from_url", lambda url, **kwargs: client)
+
+    with pytest.raises(CommandError, match="TLS handshake failed"):
+        Command(stdout=StringIO()).handle(
+            deploy=False, redis_url="rediss://localhost:6379/0"
+        )
+
+    assert client.closed is True
+
+
+def test_compat_standalone_command_tls_handshake_failure_is_actionable(monkeypatch):
+    class RedisClient:
+        def fcall(self, function, numkeys):
+            raise redis.ConnectionError("SSL: CERTIFICATE_VERIFY_FAILED")
+
+        def close(self):
+            self.closed = True
+
+    client = RedisClient()
+    monkeypatch.setattr("redis.Redis.from_url", lambda url, **kwargs: client)
+
+    with pytest.raises(CommandError, match="TLS handshake failed"):
+        CompatCommand(stdout=StringIO()).handle(redis_url="rediss://localhost:6379/0")
+
+    assert client.closed is True
+
+
+def test_redact_redis_url_strips_userinfo_and_query_string():
     assert (
         redact_redis_url("redis://:deploy-secret@10.0.0.1:6379/0")
         == "redis://10.0.0.1:6379/0"
     )
     assert (
         redact_redis_url("rediss://deploy:s3cret@seed.example:6379/0")
+        == "rediss://seed.example:6379/0"
+    )
+    assert (
+        redact_redis_url(
+            "rediss://deploy:s3cret@seed.example:6379/0?ssl_ca_certs=/tmp/ca.pem"
+        )
         == "rediss://seed.example:6379/0"
     )
     assert redact_redis_url("redis://localhost:6379/0") == "redis://localhost:6379/0"

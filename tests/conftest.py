@@ -1,14 +1,38 @@
 import asyncio
 import inspect
 import os
+import shutil
+import tempfile
 from pathlib import Path
+from subprocess import CalledProcessError
 
 import pytest
+
+from tests.redis_tls import generate_redis_tls_material, openssl_available
 
 os.environ.setdefault("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
 
 _CLUSTER_IMAGE_DIR = Path(__file__).resolve().parent / "redis-cluster"
 _CLUSTER_PORTS = (7000, 7001, 7002)
+_TLS_REDIS_CMD = [
+    "redis-server",
+    "--tls-port",
+    "6379",
+    "--port",
+    "0",
+    "--tls-cert-file",
+    "/tls/server.crt",
+    "--tls-key-file",
+    "/tls/server.key",
+    "--tls-ca-cert-file",
+    "/tls/ca.crt",
+    "--tls-auth-clients",
+    "no",
+    "--protected-mode",
+    "no",
+    "--bind",
+    "0.0.0.0",
+]
 
 
 def redis_cluster_address_remap(container):
@@ -33,6 +57,19 @@ try:
     from testcontainers.core.container import DockerContainer
     from testcontainers.core.image import DockerImage
     from testcontainers.core.wait_strategies import LogMessageWaitStrategy
+
+    def _container_log_detail(container) -> str:
+        try:
+            stdout, stderr = container.get_logs()
+        except OSError, AttributeError, DockerException:
+            return ""
+
+        def decode(value):
+            if isinstance(value, bytes):
+                return value.decode("utf-8", "replace")
+            return str(value)
+
+        return f" stdout={decode(stdout)!r} stderr={decode(stderr)!r}"
 
     @pytest.fixture(scope="module")
     def redis_container():
@@ -113,6 +150,109 @@ try:
     @pytest.fixture(scope="module")
     def redis_cluster_remap(redis_cluster_container):
         return redis_cluster_address_remap(redis_cluster_container)
+
+    @pytest.fixture(scope="module")
+    def redis_tls_certs():
+        if not openssl_available():
+            pytest.skip("openssl is unavailable for Redis TLS integration tests")
+        # pytest tmp dirs are 0700. Linux Docker preserves that, and redis:8
+        # drops to uid 999, so bind-mounted certs must live under a world-
+        # traversable path (typically /tmp at 1777).
+        directory = Path(tempfile.mkdtemp(prefix="django-queues-redis-tls-"))
+        directory.chmod(0o755)
+        try:
+            try:
+                yield generate_redis_tls_material(directory)
+            except (CalledProcessError, OSError) as exc:
+                pytest.skip(f"openssl could not generate Redis TLS material: {exc}")
+        finally:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    @pytest.fixture(scope="module")
+    def redis_tls_container(redis_tls_certs):
+        try:
+            container = (
+                DockerContainer("redis:8")
+                .with_exposed_ports(6379)
+                .with_volume_mapping(str(redis_tls_certs.directory), "/tls", "ro")
+                .with_command(_TLS_REDIS_CMD)
+                .waiting_for(LogMessageWaitStrategy("Ready to accept connections"))
+            )
+            try:
+                with container:
+                    yield container
+            except DockerException:
+                raise
+            except (RuntimeError, TimeoutError) as exc:
+                detail = _container_log_detail(container)
+                raise RuntimeError(
+                    f"Redis TLS container failed to start: {exc}.{detail}"
+                ) from exc
+        except DockerException as exc:
+            pytest.skip(f"Docker is unavailable for Redis TLS tests: {exc}")
+
+    @pytest.fixture(scope="module")
+    def redis_tls_url(redis_tls_container, redis_tls_certs):
+        from django_queue.backends.redis.functions import load_function_library
+
+        host = redis_tls_container.get_container_host_ip()
+        port = redis_tls_container.get_exposed_port(6379)
+        url = f"rediss://{host}:{port}/0"
+        client = redis.Redis.from_url(url, ssl_ca_certs=str(redis_tls_certs.ca_cert))
+        try:
+            client.function_load(load_function_library().source, replace=True)
+        finally:
+            client.close()
+        return url
+
+    @pytest.fixture(scope="module")
+    def redis_cluster_tls_container(redis_tls_certs):
+        try:
+            with DockerImage(
+                path=str(_CLUSTER_IMAGE_DIR),
+                tag="django-queues-redis-cluster:test-tls",
+            ) as image:
+                container = (
+                    DockerContainer(str(image))
+                    .with_exposed_ports(*_CLUSTER_PORTS)
+                    .with_volume_mapping(str(redis_tls_certs.directory), "/tls", "ro")
+                    .waiting_for(LogMessageWaitStrategy("cluster-ready"))
+                )
+                with container:
+                    yield container
+        except DockerException as exc:
+            pytest.skip(f"Docker is unavailable for Redis Cluster TLS tests: {exc}")
+
+    @pytest.fixture(scope="module")
+    def redis_cluster_tls_url(redis_cluster_tls_container, redis_tls_certs):
+        from django_queue.backends.redis.functions import load_function_library
+        from django_queue.management.redis_functions import (
+            iter_cluster_primary_clients,
+        )
+
+        remap = redis_cluster_address_remap(redis_cluster_tls_container)
+        host = redis_cluster_tls_container.get_container_host_ip()
+        port = redis_cluster_tls_container.get_exposed_port(7000)
+        url = f"rediss://{host}:{port}/0"
+        cluster = redis.cluster.RedisCluster.from_url(
+            url,
+            address_remap=remap,
+            ssl_ca_certs=str(redis_tls_certs.ca_cert),
+        )
+        try:
+            library = load_function_library()
+            for client, _advertised, _node in iter_cluster_primary_clients(cluster):
+                try:
+                    client.function_load(library.source, replace=True)
+                finally:
+                    client.close()
+        finally:
+            cluster.close()
+        return url
+
+    @pytest.fixture(scope="module")
+    def redis_cluster_tls_remap(redis_cluster_tls_container):
+        return redis_cluster_address_remap(redis_cluster_tls_container)
 
 except ImportError:
     pass

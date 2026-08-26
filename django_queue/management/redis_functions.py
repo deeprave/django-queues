@@ -4,21 +4,62 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import dataclass
-from typing import Any, cast
-from urllib.parse import urlsplit, urlunsplit
+from dataclasses import dataclass, field
+from typing import Any, NoReturn, cast
 
 import redis
 from django.core.management.base import CommandError
 from django.utils.module_loading import import_string
 from redis.crc import key_slot
 
+from django_queue.backends.exceptions import InvalidQueueBackendError
+from django_queue.backends.redis.transport import (
+    redact_redis_url,
+    redis_client_kwargs,
+    redis_tls_failure,
+    stricter_tls_client_kwargs,
+)
+
 REDIS_TOPOLOGY_STANDALONE = "standalone"
 REDIS_TOPOLOGY_CLUSTER = "cluster"
 DEPLOYMENT_LOCK_KEY = "django_queues:function-deploy-lock"
 
 _CLUSTER_NODE_ID = re.compile(r"^[0-9a-fA-F]{40}$")
-_PRIMARY_CLIENT_OMIT = frozenset({"host", "port", "redis_connect_func"})
+_PRIMARY_CLIENT_OMIT = frozenset(
+    {
+        "host",
+        "port",
+        "path",
+        "redis_connect_func",
+        "connection_class",
+        "connection_pool",
+    }
+)
+_PRIMARY_CLIENT_KEEP = frozenset(
+    {
+        "username",
+        "password",
+        "db",
+        "ssl",
+        "encoding",
+        "encoding_errors",
+        "decode_responses",
+        "socket_timeout",
+        "socket_connect_timeout",
+        "socket_keepalive",
+        "socket_keepalive_options",
+        "socket_type",
+        "retry",
+        "retry_on_timeout",
+        "retry_on_error",
+        "health_check_interval",
+        "client_name",
+        "lib_name",
+        "lib_version",
+        "credential_provider",
+        "protocol",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,22 +70,7 @@ class RedisFunctionTarget:
     topology: str
     aliases: tuple[str, ...] = ()
     address_remap: Callable[[tuple[str, int]], tuple[str, int]] | None = None
-
-
-def redact_redis_url(url: str) -> str:
-    """Return *url* without username or password userinfo."""
-    parsed = urlsplit(url)
-    if parsed.username is None and parsed.password is None:
-        return url
-    hostname = parsed.hostname or ""
-    if ":" in hostname and not hostname.startswith("["):
-        hostname = f"[{hostname}]"
-    netloc = hostname
-    if parsed.port is not None:
-        netloc = f"{hostname}:{parsed.port}"
-    return urlunsplit(
-        (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
-    )
+    client_kwargs: Mapping[str, Any] = field(default_factory=dict)
 
 
 def warn_duplicate_cluster_seeds(
@@ -66,9 +92,16 @@ def warn_duplicate_cluster_seeds(
             )
 
 
+def raise_redis_command_error(exc: BaseException, url: str, prefix: str) -> NoReturn:
+    """Re-raise a Redis client failure as CommandError, preserving TLS context."""
+    if tls_error := redis_tls_failure(exc, url):
+        raise CommandError(str(tls_error)) from exc
+    raise CommandError(f"{prefix}: {exc}") from exc
+
+
 def cluster_from_url_kwargs(target: RedisFunctionTarget) -> dict[str, Any]:
     """Keyword arguments ``RedisCluster.from_url`` needs for this target."""
-    kwargs: dict[str, object] = {}
+    kwargs = dict(target.client_kwargs)
     if target.address_remap is not None:
         kwargs["address_remap"] = target.address_remap
     return kwargs
@@ -159,14 +192,27 @@ def resolve_redis_targets(
             "--redis-url and --redis-cluster-url are mutually exclusive."
         )
     if redis_url is not None:
-        return (RedisFunctionTarget(redis_url, REDIS_TOPOLOGY_STANDALONE),)
+        return (
+            RedisFunctionTarget(
+                redis_url,
+                REDIS_TOPOLOGY_STANDALONE,
+                client_kwargs=_client_kwargs(redis_url),
+            ),
+        )
     if redis_cluster_url is not None:
-        return (RedisFunctionTarget(redis_cluster_url, REDIS_TOPOLOGY_CLUSTER),)
+        return (
+            RedisFunctionTarget(
+                redis_cluster_url,
+                REDIS_TOPOLOGY_CLUSTER,
+                client_kwargs=_client_kwargs(redis_cluster_url),
+            ),
+        )
 
     grouped: dict[tuple[str, str], list[str]] = {}
     remaps: dict[
         tuple[str, str], Callable[[tuple[str, int]], tuple[str, int]] | None
     ] = {}
+    kwargs_by_key: dict[tuple[str, str], dict[str, Any]] = {}
     order: list[tuple[str, str]] = []
     for alias, options in queue_settings.items():
         backend_path = options.get("BACKEND")
@@ -195,10 +241,16 @@ def resolve_redis_targets(
             if callable(options.get("address_remap"))
             else None,
         )
+        client_kwargs = _client_kwargs(location, options)
         if key not in grouped:
             grouped[key] = []
             remaps[key] = remap
+            kwargs_by_key[key] = client_kwargs
             order.append(key)
+        else:
+            kwargs_by_key[key] = stricter_tls_client_kwargs(
+                kwargs_by_key[key], client_kwargs
+            )
         grouped[key].append(alias)
         if remaps[key] is None and remap is not None:
             remaps[key] = remap
@@ -208,9 +260,19 @@ def resolve_redis_targets(
             topology,
             tuple(grouped[(topology, url)]),
             remaps[(topology, url)],
+            kwargs_by_key[(topology, url)],
         )
         for topology, url in order
     )
+
+
+def _client_kwargs(
+    url: str, options: Mapping[str, object] | None = None
+) -> dict[str, Any]:
+    try:
+        return redis_client_kwargs(url, options)
+    except InvalidQueueBackendError as exc:
+        raise CommandError(str(exc)) from exc
 
 
 def resolve_redis_urls(
@@ -281,11 +343,8 @@ def iter_cluster_primary_clients(
         if initialize is not None and not slots:
             initialize()
     remap = getattr(manager, "remap_host_port", None)
-    stored = getattr(manager, "connection_kwargs", None)
-    connection_kwargs = (
-        {key: value for key, value in stored.items() if key not in _PRIMARY_CLIENT_OMIT}
-        if isinstance(stored, Mapping)
-        else {}
+    connection_kwargs = _primary_client_kwargs(
+        getattr(manager, "connection_kwargs", None)
     )
     for node in cluster.get_primaries():
         host, port = node.host, int(node.port)
@@ -293,6 +352,25 @@ def iter_cluster_primary_clients(
         if remap is not None:
             host, port = remap(host, port)
         yield redis.Redis(host=host, port=port, **connection_kwargs), advertised, node
+
+
+def _primary_client_kwargs(stored: object) -> dict[str, Any]:
+    """Copy seed TLS and credentials onto a per-primary ``Redis()`` client."""
+    if not isinstance(stored, Mapping):
+        return {}
+    kwargs = {
+        key: value
+        for key, value in stored.items()
+        if key not in _PRIMARY_CLIENT_OMIT
+        and (key in _PRIMARY_CLIENT_KEEP or key.startswith("ssl_"))
+    }
+    connection_class = stored.get("connection_class")
+    if kwargs.get("ssl") or (
+        connection_class is not None
+        and "SSL" in getattr(connection_class, "__name__", "")
+    ):
+        kwargs["ssl"] = True
+    return kwargs
 
 
 def deployment_lock_key(cluster, node) -> str:

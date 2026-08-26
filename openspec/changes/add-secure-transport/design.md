@@ -5,11 +5,10 @@ construct clients with redis-py `from_url(LOCATION)`. That parses `rediss://`
 into SSL flags for the seed client, but the package does not document TLS,
 does not accept CA or client-certificate OPTIONS, and Cluster Function
 deployment currently constructs per-primary `Redis(host, port)` clients that
-drop URL credentials and SSL. Stunnel is an operator process, not a library.
+can drop URL credentials and SSL.
 
-Cluster backends and their live fixture are introduced by `add-cluster-support`.
-This change applies encrypted transport to both topologies; Cluster TLS live
-tests require that backend family.
+Cluster backends and their live fixture are already on main. This change
+applies encrypted transport to both topologies.
 
 ## Goals / Non-Goals
 
@@ -17,16 +16,15 @@ tests require that backend family.
 
 - Make `rediss://` plus TLS OPTIONS a supported contract for every Redis TCP
   connection the package opens.
-- Treat stunnel and other TLS terminators as the same client contract when
-  advertised endpoints are the TLS listeners.
-- Prove native TLS on standalone and Cluster, and stunnel in front of
-  standalone Redis, in live tests.
+- Prove native Redis TLS on standalone and Cluster in live tests.
 
 **Non-Goals:**
 
-- Spawning, configuring, or bundling stunnel (or any terminator).
-- A three-node Cluster-plus-stunnel live fixture; Cluster native TLS plus
-  standalone stunnel cover the client and terminator contracts.
+- Explicit support, fixtures, or documentation for stunnel or other TLS
+  terminators. A terminator that presents a TLS Redis listener is reachable
+  with the same `rediss://` client as native `tls-port`; the package does not
+  treat that as a separate deployment.
+- Spawning, configuring, or bundling any TLS terminator.
 - Auto-detecting TLS from a `redis://` URL, Sentinel, or mixed plaintext/TLS
   node sets.
 - Changing Function `api_version` or queue semantics.
@@ -37,9 +35,8 @@ tests require that backend family.
 
 `rediss://` means every subsequent Redis connection for that target is TLS.
 `redis://` means plaintext. TLS OPTIONS on a `redis://` LOCATION are a
-configuration error, not a silent upgrade. URL auto-upgrade was rejected
-because a mistyped scheme would encrypt unexpectedly or, worse, a `rediss`
-typo to `redis` would look like success on an open port.
+configuration error, not a silent upgrade. OPTIONS may override URL query SSL
+keys on a `rediss://` LOCATION; they do not change the scheme.
 
 redis-py already maps `rediss://` to `ssl=True`. The package will pass that
 through rather than implementing a TLS stack.
@@ -56,74 +53,76 @@ Username and password remain URL userinfo (and any redis-py query equivalents).
 TLS and AUTH are independent.
 
 Default verification follows redis-py for `rediss://` (certificate required,
-hostname checked). Tests supply a generated CA via `ssl_ca_certs` rather than
-disabling verification.
+hostname checked). redis-py builds the SSL context with
+`ssl.create_default_context()`, so a server cert issued by a CA already in
+the system trust store needs no `ssl_ca_certs`. A private or generated CA
+is passed as `ssl_ca_certs` (or `ssl_ca_path` / `ssl_ca_data`). Disabling
+verification (`ssl_cert_reqs` none) remains an explicit OPTION, not the
+default. Tests use a generated CA via `ssl_ca_certs` rather than disabling
+verification or installing that CA into the system store.
 
 ### One connection-settings helper for every client
 
-A shared helper derives constructor kwargs from LOCATION plus OPTIONS
-(credentials, SSL, and Cluster `address_remap` when present). Standalone
+A shared helper derives TLS constructor kwargs from LOCATION plus OPTIONS
+(scheme and SSL files, cert requirements, hostname check). Standalone
 `from_url`, Cluster `from_url`, observer clients, management-command seed
-clients, and per-primary `Redis()` clients all use it. Per-primary clients
-override only host and port after remap; they MUST copy the rest of the
-cluster manager's connection kwargs.
-
-This is the product fix for Cluster deploy dropping AUTH/TLS, not a
-kwargs-only unit test bolted onto Cluster support.
-
-### Stunnel is a terminator, not a feature flag
-
-The package never starts stunnel. Operators run stunnel (or an equivalent)
-so the address in LOCATION is a TLS listener. The client uses `rediss://`
-exactly as for native Redis `tls-port`.
-
-For Cluster, `CLUSTER SLOTS` / announce MUST return those TLS listener
-addresses. Wrapping only the seed leaves discovered plaintext `host:port`
-values; the client must fail rather than open plaintext node connections.
-Native Redis Cluster TLS (`tls-port` and `tls-cluster`) is the live Cluster
-proof; stunnel-on-Cluster is documented with that announce rule.
+clients, and per-primary `Redis()` clients all use it. Cluster
+`address_remap` remains a Cluster-only overlay applied by the Cluster
+provider and Function-library Cluster constructors, not by the TLS helper.
+Per-primary clients override only host and port after remap; they MUST copy
+the rest of the cluster manager's connection kwargs.
 
 ### Live fixtures
 
-- Standalone native TLS: Redis 8 with `tls-port`, generated test CA and server
-  cert, plaintext port disabled or unused.
-- Cluster native TLS: the three-process Redis 8 Cluster image with TLS on each
-  client port and `tls-cluster yes`, plus existing `address_remap` for
-  published ports.
-- Standalone stunnel: plaintext Redis plus a stunnel listener; LOCATION is
-  `rediss://` to the stunnel port with the test CA.
+Live TLS tests generate a short-lived test CA and a server certificate at
+fixture or image-entrypoint time. Those PEMs are not committed. Redis is
+configured with `tls-cert-file` / `tls-key-file` / `tls-ca-cert-file`; pytest
+clients pass the CA path as `ssl_ca_certs`. A second generated CA that did
+not issue the server cert covers the untrusted-certificate scenario. Client
+certificates are not part of the live fixtures. Existing plaintext Redis and
+Cluster fixtures stay as they are.
 
-Do not add a stunnel Debian package to the Redis Cluster image.
+- Standalone native TLS: Redis 8 with `tls-port`, generated CA and server
+  cert, plaintext port disabled or unused.
+- Cluster native TLS: the three-process Redis 8 Cluster image with the same
+  CA on every node and TLS on each client `tls-port`. The single-container
+  fixture keeps the cluster bus in plaintext (`tls-cluster no`) so `CLUSTER
+  MEET` can join; clients still use `rediss://`. Existing `address_remap`
+  covers published ports. Hostname verification uses the host string pytest
+  dials (`get_container_host_ip()`, remapped for Cluster). The generated
+  server cert SAN includes the likely testcontainers identities:
+  DNS `localhost` and `host.docker.internal`, IP `127.0.0.1`, `::1`, and
+  `172.17.0.1`. Python treats `localhost` as a DNS name and `127.0.0.1` as
+  an IP, so both are required. Success criterion is local Docker Desktop and
+  GitHub `ubuntu-latest` CI. Exotic hosts (`TESTCONTAINERS_HOST_OVERRIDE`,
+  non-default bridge IPs) are out of scope for the fixture rather than a
+  reason to disable `ssl_check_hostname`.
 
 ### Alternatives considered
 
 - **URL query-only SSL paths.** Works with redis-py but is a poor Django
   settings shape for certificate files. OPTIONS are the documented path;
   query params still parse if present.
-- **In-process TLS terminator.** Out of scope; stunnel stays an external
-  process.
+- **First-class stunnel support.** Unnecessary once Redis native TLS exists.
+  Any TLS listener, including a terminator, already works as `rediss://`.
 - **CERT_NONE by default in tests and docs.** Convenient and unsafe. Tests
   generate a CA.
 
 ## Risks / Trade-offs
 
 - [Cluster announce mismatch] → Fail closed when a discovered node cannot be
-  dialed with the configured TLS settings; document announce/stunnel port
-  alignment.
+  dialed with the configured TLS settings.
 - [Fixture complexity] → Reuse the Cluster image pattern; add TLS via config
   and certs mounted or generated at entrypoint, rather than a second Cluster
   topology.
 - [Self-signed production certs] → Operators must set `ssl_ca_certs`; do not
   document disabling verification as the normal path.
-- [Depends on Cluster backends] → Implement standalone TLS first if Cluster
-  is not yet merged; Cluster TLS tests wait on that family.
 
 ## Migration Plan
 
 Existing `redis://` aliases are unchanged. Operators move LOCATION to
-`rediss://`, add CA OPTIONS, and point Cluster announce or stunnel at TLS
-listeners. Rollback is reverting LOCATION to `redis://` and removing TLS
-OPTIONS. Function library contents are unaffected.
+`rediss://` and add CA OPTIONS. Rollback is reverting LOCATION to `redis://`
+and removing TLS OPTIONS. Function library contents are unaffected.
 
 ## Open Questions
 

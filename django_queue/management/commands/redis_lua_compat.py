@@ -14,6 +14,7 @@ from django_queue.management.redis_functions import (
     cluster_from_url_kwargs,
     cluster_node_ids,
     iter_cluster_primary_clients,
+    raise_redis_command_error,
     read_library_info,
     resolve_redis_targets,
     warn_duplicate_cluster_seeds,
@@ -66,17 +67,17 @@ class Command(BaseCommand):
 
     def _check_standalone_target(self, target) -> None:
         try:
-            client = redis.Redis.from_url(target.url)
+            client = redis.Redis.from_url(target.url, **target.client_kwargs)
         except (redis.RedisError, ValueError) as exc:
-            raise CommandError(
-                f"Redis Function compatibility check failed: {exc}"
-            ) from exc
+            raise_redis_command_error(
+                exc, target.url, "Redis Function compatibility check failed"
+            )
         try:
             self._report_compatibility(client.fcall("django_queue_info", 0))
         except redis.RedisError as exc:
-            raise CommandError(
-                f"Redis Function compatibility check failed: {exc}"
-            ) from exc
+            raise_redis_command_error(
+                exc, target.url, "Redis Function compatibility check failed"
+            )
         finally:
             client.close()
 
@@ -90,9 +91,9 @@ class Command(BaseCommand):
                 target.url, **cluster_from_url_kwargs(target)
             )
         except (redis.RedisError, ValueError, TypeError) as exc:
-            raise CommandError(
-                f"Redis Function compatibility check failed: {exc}"
-            ) from exc
+            raise_redis_command_error(
+                exc, target.url, "Redis Function compatibility check failed"
+            )
         try:
             try:
                 cluster_identities.append((target.url, cluster_node_ids(cluster)))
@@ -104,9 +105,11 @@ class Command(BaseCommand):
                 try:
                     self._report_compatibility(client.fcall("django_queue_info", 0))
                 except redis.RedisError as exc:
-                    raise CommandError(
-                        f"Redis Function compatibility check failed on {advertised}: {exc}"
-                    ) from exc
+                    raise_redis_command_error(
+                        exc,
+                        target.url,
+                        f"Redis Function compatibility check failed on {advertised}",
+                    )
                 finally:
                     client.close()
             if not found:

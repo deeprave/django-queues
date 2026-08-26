@@ -273,6 +273,63 @@ def test_resolve_redis_targets_carries_configured_address_remap():
     )
 
 
+def test_resolve_redis_targets_carries_tls_client_kwargs():
+    targets = resolve_redis_targets(
+        {
+            "jobs": {
+                "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                "LOCATION": "rediss://deploy:s3cret@seed.example:6379/0",
+                "ssl_ca_certs": "/tls/ca.pem",
+                "ssl_check_hostname": True,
+            }
+        }
+    )
+
+    assert targets[0].url == "rediss://deploy:s3cret@seed.example:6379/0"
+    assert targets[0].client_kwargs["ssl_ca_certs"] == "/tls/ca.pem"
+    assert targets[0].client_kwargs["ssl_check_hostname"] is True
+    assert "ssl" not in targets[0].client_kwargs
+
+
+def test_resolve_redis_targets_keeps_stricter_tls_options_for_shared_location():
+    targets = resolve_redis_targets(
+        {
+            "first": {
+                "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                "LOCATION": "rediss://seed.example:6379/0",
+                "ssl_cert_reqs": "none",
+                "ssl_check_hostname": False,
+            },
+            "second": {
+                "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                "LOCATION": "rediss://seed.example:6379/0",
+                "ssl_ca_certs": "/tls/ca.pem",
+                "ssl_cert_reqs": "required",
+                "ssl_check_hostname": True,
+            },
+        }
+    )
+
+    assert len(targets) == 1
+    assert targets[0].aliases == ("first", "second")
+    assert targets[0].client_kwargs["ssl_ca_certs"] == "/tls/ca.pem"
+    assert targets[0].client_kwargs["ssl_cert_reqs"] == "required"
+    assert targets[0].client_kwargs["ssl_check_hostname"] is True
+
+
+def test_resolve_redis_targets_rejects_tls_options_on_plaintext_url():
+    with pytest.raises(CommandError, match="rediss://"):
+        resolve_redis_targets(
+            {
+                "jobs": {
+                    "BACKEND": "django_queue.backends.redis.RedisAsyncQueue",
+                    "LOCATION": "redis://localhost:6379/0",
+                    "ssl_ca_certs": "/tls/ca.pem",
+                }
+            }
+        )
+
+
 def test_parse_cluster_node_ids_from_cluster_nodes_text():
     nodes = (
         "07c37dfeb235213a872192d90877d0cd35411309 127.0.0.1:7000@17000 master - 0 0 1 connected 0-5460\n"
@@ -964,6 +1021,37 @@ def test_cluster_primary_clients_forward_rediss_url_settings(monkeypatch):
     )
 
 
+def test_cluster_primary_clients_do_not_open_plaintext_when_seed_is_rediss(
+    monkeypatch,
+):
+    captured = []
+    parsed = redis.connection.parse_url("rediss://deploy:s3cret@seed.example:6379/0")
+
+    class RecordingRedis:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+    cluster = SimpleNamespace(
+        nodes_manager=SimpleNamespace(
+            connection_kwargs={**parsed, "ssl_ca_certs": "/tls/ca.pem"},
+            slots_cache={0: True},
+        ),
+        get_primaries=lambda: [_Node("10.0.0.1", 6379)],
+    )
+
+    monkeypatch.setattr(
+        "django_queue.management.redis_functions.redis.Redis", RecordingRedis
+    )
+
+    list(iter_cluster_primary_clients(cluster))
+
+    assert captured[0]["host"] == "10.0.0.1"
+    assert captured[0]["port"] == 6379
+    assert captured[0].get("ssl") is True
+    assert "connection_class" not in captured[0]
+    assert captured[0]["ssl_ca_certs"] == "/tls/ca.pem"
+
+
 def test_libcheck_passes_configured_address_remap_to_cluster_client(monkeypatch):
     def remap(address):
         return address
@@ -1003,6 +1091,88 @@ def test_libcheck_passes_configured_address_remap_to_cluster_client(monkeypatch)
 
     assert captured["url"] == "redis://cluster/0"
     assert captured["kwargs"]["address_remap"] is remap
+
+
+def test_libcheck_passes_rediss_credentials_and_tls_options_to_cluster_clients(
+    monkeypatch,
+):
+    captured = {}
+
+    def from_url(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        cluster = _FakeCluster([_Node("10.0.0.1", 7000)])
+        parsed = redis.connection.parse_url(url)
+        cluster.nodes_manager = SimpleNamespace(
+            connection_kwargs={**parsed, **kwargs},
+            slots_cache={},
+            initialize=lambda: None,
+        )
+        return cluster
+
+    _NodeRedis.clients = []
+    monkeypatch.setattr(
+        "django_queue.management.commands.redis_lua_lib.RedisCluster.from_url",
+        from_url,
+    )
+    monkeypatch.setattr(
+        "django_queue.management.redis_functions.redis.Redis", _NodeRedis
+    )
+    monkeypatch.setattr(
+        django_queue,
+        "queues",
+        django_queue.QueueRegistry(
+            {
+                "jobs": {
+                    "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                    "LOCATION": "rediss://deploy:s3cret@seed.example:6379/0",
+                    "ssl_ca_certs": "/tls/ca.pem",
+                }
+            }
+        ),
+    )
+
+    LibCommand(stdout=StringIO()).handle(
+        deploy=True, redis_url=None, redis_cluster_url=None
+    )
+
+    assert captured["url"] == "rediss://deploy:s3cret@seed.example:6379/0"
+    assert "ssl" not in captured["kwargs"]
+    assert captured["kwargs"]["ssl_ca_certs"] == "/tls/ca.pem"
+    assert _NodeRedis.clients[0].kwargs["password"] == "s3cret"
+    assert _NodeRedis.clients[0].kwargs["ssl_ca_certs"] == "/tls/ca.pem"
+    connection_class = _NodeRedis.clients[0].kwargs.get("connection_class")
+    assert _NodeRedis.clients[0].kwargs.get("ssl") or (
+        connection_class is not None and "SSL" in connection_class.__name__
+    )
+
+
+def test_libcheck_cluster_tls_handshake_failure_is_actionable(monkeypatch):
+    def from_url(url, **kwargs):
+        raise redis.ConnectionError("SSL: CERTIFICATE_VERIFY_FAILED")
+
+    monkeypatch.setattr(
+        "django_queue.management.commands.redis_lua_lib.RedisCluster.from_url",
+        from_url,
+    )
+    monkeypatch.setattr(
+        django_queue,
+        "queues",
+        django_queue.QueueRegistry(
+            {
+                "jobs": {
+                    "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                    "LOCATION": "rediss://seed.example:6379/0",
+                    "ssl_ca_certs": "/tls/ca.pem",
+                }
+            }
+        ),
+    )
+
+    with pytest.raises(CommandError, match="TLS handshake failed"):
+        LibCommand(stdout=StringIO()).handle(
+            deploy=True, redis_url=None, redis_cluster_url=None
+        )
 
 
 def test_libcheck_closes_primary_clients_when_a_primary_fails(monkeypatch):
