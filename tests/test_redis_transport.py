@@ -13,6 +13,7 @@ from django_queue.backends.redis.provider import QueueProviderRedis
 from django_queue.backends.redis.transport import (
     redact_redis_url,
     redis_client_kwargs,
+    redis_from_url_location,
     redis_tls_failure,
 )
 from django_queue.clock import QueueClockError
@@ -59,6 +60,39 @@ def test_rediss_options_override_url_query_ssl_keys():
     assert kwargs["ssl_cert_reqs"] == "required"
     assert kwargs["ssl_ca_certs"] == "/options/ca.pem"
     assert kwargs["ssl_check_hostname"] is True
+
+
+def test_rediss_url_query_tls_keys_are_copied_into_client_kwargs():
+    kwargs = redis_client_kwargs("rediss://localhost:6379/0?ssl_ca_certs=/url/ca.pem")
+
+    assert kwargs["ssl_ca_certs"] == "/url/ca.pem"
+
+
+def test_redis_from_url_location_strips_tls_query_keys():
+    assert (
+        redis_from_url_location(
+            "rediss://localhost:6379/0?ssl_cert_reqs=none&socket_timeout=1"
+        )
+        == "rediss://localhost:6379/0?socket_timeout=1"
+    )
+
+
+def test_rediss_options_win_over_url_query_on_constructed_client():
+    queue = RedisAsyncQueue(
+        "rediss://localhost:6379/0?ssl_cert_reqs=none&ssl_ca_certs=/url/ca.pem",
+        queue_name="tls-options-win",
+        ssl_cert_reqs="required",
+        ssl_ca_certs="/options/ca.pem",
+        ssl_check_hostname=True,
+    )
+    client = queue._provider._create_async_client()
+    try:
+        pool_kwargs = client.connection_pool.connection_kwargs
+        assert pool_kwargs.get("ssl_cert_reqs") in ("required", ssl.CERT_REQUIRED)
+        assert pool_kwargs.get("ssl_ca_certs") == "/options/ca.pem"
+        assert pool_kwargs.get("ssl_check_hostname") is True
+    finally:
+        asyncio.run(queue._provider._aclose_client(client))
 
 
 def test_redis_url_with_tls_options_is_a_configuration_error():
@@ -262,6 +296,16 @@ def test_rediss_clock_timeout_is_a_tls_failure():
 
     assert error is not None
     assert "Could not establish a TLS connection" in str(error)
+
+
+def test_plaintext_host_named_ssl_is_not_a_tls_failure():
+    assert (
+        redis_tls_failure(
+            redis.ConnectionError("Error connecting to redis-ssl:6379"),
+            "redis://redis-ssl:6379/0",
+        )
+        is None
+    )
 
 
 def test_rediss_authentication_error_is_not_a_tls_failure():

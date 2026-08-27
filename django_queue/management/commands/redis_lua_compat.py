@@ -8,6 +8,7 @@ from redis.cluster import RedisCluster
 
 import django_queue
 from django_queue.backends.redis.functions import FUNCTION_API_VERSION
+from django_queue.backends.redis.transport import redis_from_url_location
 from django_queue.management.redis_functions import (
     REDIS_TOPOLOGY_CLUSTER,
     REDIS_TOPOLOGY_STANDALONE,
@@ -67,7 +68,9 @@ class Command(BaseCommand):
 
     def _check_standalone_target(self, target) -> None:
         try:
-            client = redis.Redis.from_url(target.url, **target.client_kwargs)
+            client = redis.Redis.from_url(
+                redis_from_url_location(target.url), **target.client_kwargs
+            )
         except (redis.RedisError, ValueError) as exc:
             raise_redis_command_error(
                 exc, target.url, "Redis Function compatibility check failed"
@@ -88,7 +91,7 @@ class Command(BaseCommand):
     ) -> None:
         try:
             cluster = RedisCluster.from_url(
-                target.url, **cluster_from_url_kwargs(target)
+                redis_from_url_location(target.url), **cluster_from_url_kwargs(target)
             )
         except (redis.RedisError, ValueError, TypeError) as exc:
             raise_redis_command_error(

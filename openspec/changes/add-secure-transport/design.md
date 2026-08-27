@@ -48,6 +48,8 @@ LOCATION stays a URL. CA bundle, client certificate, client key,
 connection keyword names. They are merged into every client constructor.
 When both a URL query parameter and an OPTION set the same SSL key, OPTIONS
 win so Django settings remain the operator-facing place for filesystem paths.
+TLS query keys are copied into constructor kwargs and stripped from the URL
+passed to `from_url`, because redis-py otherwise lets the query string win.
 
 Username and password remain URL userinfo (and any redis-py query equivalents).
 TLS and AUTH are independent.

@@ -14,6 +14,7 @@ from django_queue.backends.redis.functions import (
     FUNCTION_LIBRARY_NAME,
     load_function_library,
 )
+from django_queue.backends.redis.transport import redis_from_url_location
 from django_queue.management.redis_functions import (
     DEPLOYMENT_LOCK_KEY,
     REDIS_TOPOLOGY_CLUSTER,
@@ -108,7 +109,9 @@ class Command(BaseCommand):
         self, target, *, library, deploy: bool, rollback: bool
     ) -> None:
         try:
-            client = redis.Redis.from_url(target.url, **target.client_kwargs)
+            client = redis.Redis.from_url(
+                redis_from_url_location(target.url), **target.client_kwargs
+            )
         except (redis.RedisError, ValueError) as exc:
             raise_redis_command_error(exc, target.url, "Redis Function check failed")
         try:
@@ -131,7 +134,7 @@ class Command(BaseCommand):
     ) -> None:
         try:
             cluster = RedisCluster.from_url(
-                target.url, **cluster_from_url_kwargs(target)
+                redis_from_url_location(target.url), **cluster_from_url_kwargs(target)
             )
         except (redis.RedisError, ValueError, TypeError) as exc:
             raise_redis_command_error(exc, target.url, "Redis Function check failed")

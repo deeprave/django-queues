@@ -5,7 +5,7 @@ from __future__ import annotations
 import ssl
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import redis
 from redis.exceptions import AuthenticationError, AuthorizationError, BusyLoadingError
@@ -52,7 +52,9 @@ def redis_client_kwargs(
 
     ``rediss://`` selects TLS. TLS keys in OPTIONS or the URL query on a
     ``redis://`` LOCATION are a configuration error. OPTIONS override URL query
-    SSL keys on ``rediss://``. ``ssl`` is never passed to ``from_url``.
+    SSL keys on ``rediss://``. Callers must pass ``redis_from_url_location(url)``
+    to ``from_url`` so redis-py cannot let the query string win. ``ssl`` is
+    never passed to ``from_url``.
     """
     options = {} if options is None else dict(options)
     scheme = urlsplit(url).scheme.lower()
@@ -71,14 +73,32 @@ def redis_client_kwargs(
                 "in the URL query"
             )
         tls_options.pop("ssl", None)
-        kwargs.update(tls_options)
+        merged = {key: value for key, value in url_tls_keys.items() if key != "ssl"}
+        merged.update(tls_options)
+        kwargs.update(merged)
     return kwargs
+
+
+def redis_from_url_location(url: str) -> str:
+    """Return *url* with TLS query keys removed so OPTIONS can win in ``from_url``."""
+    parsed = urlsplit(url)
+    if not parsed.query:
+        return url
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    kept = tuple(
+        (key, value) for key, value in pairs if key.lower() not in _TLS_OPTION_KEYS
+    )
+    if len(kept) == len(pairs):
+        return url
+    return urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urlencode(kept), parsed.fragment)
+    )
 
 
 def redis_tls_failure(exc: BaseException, url: str) -> InvalidQueueBackendError | None:
     """Return an actionable TLS error when *exc* is a handshake or reachability failure."""
     scheme = urlsplit(url).scheme.lower()
-    handshake = _is_tls_failure(exc)
+    handshake = scheme == "rediss" and _is_tls_failure(exc)
     reachability = scheme == "rediss" and _is_tls_reachability_failure(exc)
     if not handshake and not reachability:
         return None
@@ -124,16 +144,27 @@ def stricter_tls_client_kwargs(
     )
     if stricter_reqs is not None:
         merged["ssl_cert_reqs"] = stricter_reqs
-    for key in (
-        "ssl_ca_certs",
-        "ssl_ca_path",
-        "ssl_ca_data",
-        "ssl_certfile",
-        "ssl_keyfile",
-    ):
-        if incoming.get(key) and not merged.get(key):
-            merged[key] = incoming[key]
+    for key in _TLS_OPTION_KEYS:
+        if key in {"ssl", "ssl_check_hostname", "ssl_cert_reqs"}:
+            continue
+        if key not in incoming:
+            continue
+        incoming_value = incoming[key]
+        if not _tls_option_set(incoming_value):
+            continue
+        current_value = merged.get(key)
+        if not _tls_option_set(current_value):
+            merged[key] = incoming_value
+        elif current_value != incoming_value:
+            raise InvalidQueueBackendError(
+                "Redis aliases that share a LOCATION disagree on "
+                f"{key}; a single Function-library client cannot represent both."
+            )
     return merged
+
+
+def _tls_option_set(value: object) -> bool:
+    return value is not None and value != ""
 
 
 def _ssl_explicitly_disabled(value: object) -> bool:

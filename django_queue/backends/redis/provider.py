@@ -35,6 +35,7 @@ from django_queue.backends.exceptions import (
 from django_queue.backends.redis.functions import FUNCTION_API_VERSION
 from django_queue.backends.redis.transport import (
     redis_client_kwargs,
+    redis_from_url_location,
     redis_tls_failure,
 )
 from django_queue.clock import (
@@ -197,7 +198,9 @@ class QueueProviderRedis:
         self._clock: QueueClock = _RedisClockFacade(self)
 
     def _create_async_client(self) -> Any:
-        return async_redis.from_url(self._redis_url, **self._client_kwargs)
+        return async_redis.from_url(
+            redis_from_url_location(self._redis_url), **self._client_kwargs
+        )
 
     def _function_info_keys(self) -> tuple[str, ...]:
         return ()
@@ -1177,7 +1180,9 @@ class QueueProviderRedisCluster(QueueProviderRedis):
         kwargs = dict(self._client_kwargs)
         if self._address_remap is not None:
             kwargs["address_remap"] = self._address_remap
-        return AsyncRedisCluster.from_url(self._redis_url, **kwargs)
+        return AsyncRedisCluster.from_url(
+            redis_from_url_location(self._redis_url), **kwargs
+        )
 
     def _function_info_keys(self) -> tuple[str, ...]:
         return (self._queue_name,)

@@ -248,9 +248,12 @@ def resolve_redis_targets(
             kwargs_by_key[key] = client_kwargs
             order.append(key)
         else:
-            kwargs_by_key[key] = stricter_tls_client_kwargs(
-                kwargs_by_key[key], client_kwargs
-            )
+            try:
+                kwargs_by_key[key] = stricter_tls_client_kwargs(
+                    kwargs_by_key[key], client_kwargs
+                )
+            except InvalidQueueBackendError as exc:
+                raise CommandError(str(exc)) from exc
         grouped[key].append(alias)
         if remaps[key] is None and remap is not None:
             remaps[key] = remap

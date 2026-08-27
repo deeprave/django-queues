@@ -317,6 +317,45 @@ def test_resolve_redis_targets_keeps_stricter_tls_options_for_shared_location():
     assert targets[0].client_kwargs["ssl_check_hostname"] is True
 
 
+def test_resolve_redis_targets_merges_later_tls_password_for_shared_location():
+    targets = resolve_redis_targets(
+        {
+            "first": {
+                "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                "LOCATION": "rediss://seed.example:6379/0",
+                "ssl_ca_certs": "/tls/ca.pem",
+            },
+            "second": {
+                "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                "LOCATION": "rediss://seed.example:6379/0",
+                "ssl_password": "example-key",
+            },
+        }
+    )
+
+    assert len(targets) == 1
+    assert targets[0].client_kwargs["ssl_ca_certs"] == "/tls/ca.pem"
+    assert targets[0].client_kwargs["ssl_password"] == "example-key"
+
+
+def test_resolve_redis_targets_rejects_conflicting_tls_options_for_shared_location():
+    with pytest.raises(CommandError, match="ssl_password"):
+        resolve_redis_targets(
+            {
+                "first": {
+                    "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                    "LOCATION": "rediss://seed.example:6379/0",
+                    "ssl_password": "first-key",
+                },
+                "second": {
+                    "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueue",
+                    "LOCATION": "rediss://seed.example:6379/0",
+                    "ssl_password": "second-key",
+                },
+            }
+        )
+
+
 def test_resolve_redis_targets_rejects_tls_options_on_plaintext_url():
     with pytest.raises(CommandError, match="rediss://"):
         resolve_redis_targets(

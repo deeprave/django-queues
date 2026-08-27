@@ -1,5 +1,7 @@
 # Agent Notes
 
+Python 3.14 implements [PEP 758](https://peps.python.org/pep-0758/): `except` and `except*` may list multiple exception types without parentheses (`except AttributeError, TypeError:`). That is required style in this repo (`ruff format` emits it). It is not Python 2 `except E, e` and is not a SyntaxError.
+
 If `.guide.yaml` exists, treat it as current local project state.
 
 Read `.todo/context.json` at session start when present. It is a canonical
