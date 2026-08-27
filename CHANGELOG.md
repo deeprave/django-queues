@@ -1,11 +1,13 @@
 # Changelog
 
-## Unreleased
+## v1.3.0 - 2026-08-27
 
 - Added explicit Redis Cluster backends (`RedisClusterAsyncQueue`, stack, priority, JSON, and `RedisClusterEventQueue`) that route through redis-py's asyncio Cluster client. Cluster `LOCATION` is a single database-0 seed URL; ordinary Redis backends remain standalone.
 - `redis_lua_lib --deploy` installs the Function library on every current Cluster primary. `--redis-url` is standalone-only, `--redis-cluster-url` is Cluster-only, and the flags are mutually exclusive. Rerun deployment after a topology change that introduces a new primary.
 - Cluster Function deployment forwards the seed URL's connection settings to each primary, and management commands redact credentials when they print resolved Redis URLs.
 - On Cluster, `redis_lua_compat` checks `django_queue_info` on every current primary. It remains a separate command from `redis_lua_lib` so application credentials need only FCALL, not Function-library management.
+- Encrypted Redis uses `rediss://` as the TLS switch for standalone and Cluster backends. TLS connection options (`ssl_ca_certs`, client certificates, and related redis-py SSL keys) apply to every client the package opens for that alias, including observers and Function-library commands. `redis://` plus TLS options is a configuration error; a failed handshake does not fall back to plaintext.
+- On `rediss://`, alias options override TLS keys in the URL query string. Do not set `ssl=False` or pass an `ssl` query parameter.
 
 ## v1.2.0 - 2026-08-23
 
