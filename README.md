@@ -67,7 +67,7 @@ This configures a Redis-backed FIFO async queue with JSON values. Redis-backed q
 
 For a LIFO stack, use `django_queue.backends.redis.RedisAsyncStackJson`, or add `"stack": True`. Cluster has matching `RedisClusterAsyncStack` backends.
 
-All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`; initialisation only constructs queue services and never starts a worker. Queue aliases may contain only ASCII letters, digits, `_`, and `-`.
+All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`. Initialisation constructs queue services; it does not start an async `runqueues` worker. Configured event queues start their workers with the process-wide runtime described under [Event queues](#event-queues). Queue aliases may contain only ASCII letters, digits, `_`, and `-`.
 
 ### Redis Cluster
 
