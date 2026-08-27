@@ -8,7 +8,7 @@
 
 This is an implementation of task/async and event queues for Django.
 
-The current implementation supports both memory-backed and Redis-backed pub/sub queue with Redis Functions (Lua) for atomic updates.
+It supports memory-backed queues and Redis-backed queues on standalone Redis or Redis Cluster, including encrypted (`rediss://`) connections. Redis-backed queues use Redis Functions for atomic updates.
 
 ## Requirements
 
@@ -29,7 +29,7 @@ Event queues are for streaming data in "fan-out" fashion to one or more consumer
 
 ## Backend choices
 
-Currently three:
+There are three backend families:
 
 - **Memory** queues exist only while the application process runs. Configured
   `MemoryAsyncQueue` instances are local to the resolving process and thread;
@@ -45,7 +45,7 @@ FIFO, LIFO stack, and priority ordering are available for async queues. Event qu
 
 ## Configuration
 
-Queues are configured in the Django settings module, and use a simple and familiar configuration format like **DATABASES** and **CACHES**.
+Queues are configured in the Django settings module, in a mapping that looks like **DATABASES** and **CACHES**. Pick a backend class first, then set `LOCATION` (and TLS options, if any). Redis-backed queues cannot start until the bundled Function library is deployed — that step is covered after the examples.
 
 ### Async queues
 
@@ -57,7 +57,7 @@ An async queue used only by producers is configured as follows:
 QUEUES = {
     "default": {
         "BACKEND": "django_queue.backends.redis.RedisAsyncQueueJson",
-        "LOCATION": f"redis://localhost:6379/12",
+        "LOCATION": "redis://localhost:6379/12",
         "maxsize": 64,
     },
 }
@@ -65,8 +65,13 @@ QUEUES = {
 
 This configures a Redis-backed FIFO async queue with JSON values. Redis-backed queues own their asynchronous connections; application code does not supply Redis client instances.
 
-A Redis Cluster alias uses an explicit Cluster backend and a single seed URL
-on database `0`. The client discovers the remaining topology from that seed:
+For a LIFO stack, use `django_queue.backends.redis.RedisAsyncStackJson`, or add `"stack": True`. Cluster has matching `RedisClusterAsyncStack` backends.
+
+All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`. Initialisation constructs queue services; it does not start an async `runqueues` worker. Configured event queues start their workers with the process-wide runtime described under [Event queues](#event-queues). Queue aliases may contain only ASCII letters, digits, `_`, and `-`.
+
+### Redis Cluster
+
+A Redis Cluster alias uses an explicit Cluster backend and a single seed URL on database `0`. The client discovers the remaining topology from that seed:
 
 ```python
 QUEUES = {
@@ -78,15 +83,13 @@ QUEUES = {
 }
 ```
 
-Cluster backends reject any database other than `0`. After a failover or
-scale-out that introduces a new primary, rerun `redis_lua_lib --deploy`
-before application traffic is routed to that node.
+Cluster backends reject any database other than `0`. Ordinary Redis backends stay standalone; they do not detect or switch to Cluster mode. After a failover or scale-out that introduces a new primary, rerun `redis_lua_lib --deploy` before application traffic is routed to that node.
 
-Encrypted Redis uses `rediss://`. TLS options use redis-py connection keyword
-names. A private CA is `ssl_ca_certs`; a certificate already trusted by the
-system store needs no extra option. TLS options on a `redis://` URL are a
-configuration error. Every advertised Cluster endpoint must be reachable with
-the same TLS settings; the client does not fall back to plaintext.
+### Encrypted Redis
+
+Encrypted Redis uses `rediss://`. That scheme is the TLS switch; TLS keys on a `redis://` URL are a configuration error. Options use redis-py connection keyword names. A private CA is `ssl_ca_certs`; a certificate already trusted by the system store needs no extra option. Alias options override TLS keys that appear in the URL query string.
+
+Every client the package opens for that alias uses the same settings — queue connections, observers, and Function-library commands. A failed handshake does not fall back to plaintext. On Cluster, every advertised endpoint must be reachable with those same TLS settings.
 
 ```python
 QUEUES = {
@@ -99,18 +102,39 @@ QUEUES = {
 }
 ```
 
+A Cluster alias is the same pattern with a `RedisCluster*` backend and a `rediss://` seed on database `0`.
+
+### Event queues
+
+`MemoryEventQueue`, `RedisEventQueue`, and `RedisClusterEventQueue` deliver short-lived events to local listeners instead of retaining async-work outcomes. Configure one explicitly, then register one or more listeners in application code:
+
 ```python
+# settings.py
 QUEUES = {
-    "default": {
-        "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueueJson",
-        "LOCATION": "rediss://localhost:6379/0",
-        "ssl_ca_certs": "/etc/ssl/private/redis-ca.pem",
-        "maxsize": 64,
+    "events": {
+        "BACKEND": "django_queue.backends.redis.RedisEventQueue",
+        "LOCATION": "redis://localhost:6379/12",
     },
 }
+
+
+# myproject/listeners.py
+from django_queue import queue_listener
+
+
+@queue_listener("events")
+async def send_notification(entry):
+    await notify(entry.payload)
+    return True
 ```
 
-## ⚠️ Required Redis initialisation
+`RedisClusterEventQueue` takes a database-`0` seed. Encrypted Redis uses `rediss://` the same way as async queues.
+
+An eligible listener returning `True` consumes and removes the event. Returning `False` logs a rejection and also removes it; returning `None` lets the next listener see it. If every listener passes, or a filter/listener raises, the event is released for a short delayed retry. Events expire unconsumed after an entry-specific `timeout_seconds`, the queue `TIMEOUT`, or 60 seconds by default. They never acquire a task result or terminal entry record.
+
+Django starts one process-local queue runtime once, at process startup, when `QUEUES` is non-empty. It owns one background thread and one asyncio loop, shared by every configured event queue's worker task and every observed async queue's Redis receiver task. An alias may set `WORKER` to an event-worker subclass compatible with the selected backend: memory event queues require a subclass of their memory-aware worker and Redis event queues require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata is invalid because listeners provide event dispatch. Memory event queues are local to that process. Redis workers use claims so processes compete for one active delivery, but ordering remains indeterminate across multiple listeners, processes, or retries. Use one listener in one process when strict ordering is required. An active Redis listener renews its claim while it runs; if its worker stops before settling the event, a later dispatcher recovers the expired claim for redelivery. The runtime retries an event dispatcher that stops from an infrastructure failure with bounded backoff.
+
+### Required Redis initialisation
 
 > **Redis-backed queues cannot start until the bundled `django_queues` Redis
 > Function library has been installed on every target Redis instance or
@@ -180,11 +204,6 @@ again.
 > applications start. Keep the explicit deployment step as a startup/deployment
 > safety check.
 
-To implement a stack (LIFO), use
-`django_queue.backends.redis.RedisAsyncStackJson`, or add `"stack": True`.
-
-All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`; initialisation only constructs queue services and never starts a worker. Queue aliases may contain only ASCII letters, digits, `_`, and `-`.
-
 ### Configuration reference
 
 The alias is the queue's stable application identity. It is the key in
@@ -205,7 +224,7 @@ Built-in backend options are deliberately small:
 | Option | Applies to | Meaning |
 | --- | --- | --- |
 | `maxsize` | Memory and Redis raw-value operations | Maximum number of values accepted by `add`; `0` (the default) is unbounded. |
-| `stack` | Redis queues and memory async queues | Use LIFO ordering instead of FIFO. Prefer the explicit `RedisAsyncStack` backend where one exists. |
+| `stack` | Redis queues and memory async queues | Use LIFO ordering instead of FIFO. Prefer an explicit stack backend (`RedisAsyncStack`, `RedisClusterAsyncStack`, and JSON variants) where one exists. |
 | `encoding` | Redis queues | Python codec used for raw Redis values; defaults to UTF-8. |
 | `ssl_ca_certs` | Redis queues with `rediss://` | CA bundle used to verify the Redis server certificate. Omit it when the issuer is already in the system trust store. |
 | `ssl_certfile` / `ssl_keyfile` | Redis queues with `rediss://` | Optional client certificate and key for mutual TLS. |
@@ -216,34 +235,6 @@ Built-in backend options are deliberately small:
 Custom backends may document additional options. Queue metadata (`HANDLER`,
 `WORKER`, `ENTRY_CLASS`, `TIMEOUT`, and `RETENTION_TIMEOUT`) is consumed by
 Django Queue and is never forwarded to a backend constructor.
-
-### Event queues
-
-`MemoryEventQueue` and `RedisEventQueue` deliver short-lived events to local listeners instead of retaining async-work outcomes. Configure one explicitly, then register one or more listeners in application code:
-
-```python
-# settings.py
-QUEUES = {
-    "events": {
-        "BACKEND": "django_queue.backends.redis.RedisEventQueue",
-        "LOCATION": "redis://localhost:6379/12",
-    },
-}
-
-
-# myproject/listeners.py
-from django_queue import queue_listener
-
-
-@queue_listener("events")
-async def send_notification(entry):
-    await notify(entry.payload)
-    return True
-```
-
-An eligible listener returning `True` consumes and removes the event. Returning `False` logs a rejection and also removes it; returning `None` lets the next listener see it. If every listener passes, or a filter/listener raises, the event is released for a short delayed retry. Events expire unconsumed after an entry-specific `timeout_seconds`, the queue `TIMEOUT`, or 60 seconds by default. They never acquire a task result or terminal entry record.
-
-Django starts one process-local queue runtime once, at process startup, when `QUEUES` is non-empty. It owns one background thread and one asyncio loop, shared by every configured event queue's worker task and every observed async queue's Redis receiver task. An alias may set `WORKER` to an event-worker subclass compatible with the selected backend: memory event queues require a subclass of their memory-aware worker and Redis event queues require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata is invalid because listeners provide event dispatch. Memory event queues are local to that process. Redis workers use claims so processes compete for one active delivery, but ordering remains indeterminate across multiple listeners, processes, or retries. Use one listener in one process when strict ordering is required. An active Redis listener renews its claim while it runs; if its worker stops before settling the event, a later dispatcher recovers the expired claim for redelivery. The runtime retries an event dispatcher that stops from an infrastructure failure with bounded backoff.
 
 ### Async queue handlers and extensions
 
