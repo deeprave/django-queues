@@ -82,6 +82,34 @@ Cluster backends reject any database other than `0`. After a failover or
 scale-out that introduces a new primary, rerun `redis_lua_lib --deploy`
 before application traffic is routed to that node.
 
+Encrypted Redis uses `rediss://`. TLS options use redis-py connection keyword
+names. A private CA is `ssl_ca_certs`; a certificate already trusted by the
+system store needs no extra option. TLS options on a `redis://` URL are a
+configuration error. Every advertised Cluster endpoint must be reachable with
+the same TLS settings; the client does not fall back to plaintext.
+
+```python
+QUEUES = {
+    "default": {
+        "BACKEND": "django_queue.backends.redis.RedisAsyncQueueJson",
+        "LOCATION": "rediss://localhost:6379/12",
+        "ssl_ca_certs": "/etc/ssl/private/redis-ca.pem",
+        "maxsize": 64,
+    },
+}
+```
+
+```python
+QUEUES = {
+    "default": {
+        "BACKEND": "django_queue.backends.redis.RedisClusterAsyncQueueJson",
+        "LOCATION": "rediss://localhost:6379/0",
+        "ssl_ca_certs": "/etc/ssl/private/redis-ca.pem",
+        "maxsize": 64,
+    },
+}
+```
+
 ## ⚠️ Required Redis initialisation
 
 > **Redis-backed queues cannot start until the bundled `django_queues` Redis
@@ -165,7 +193,7 @@ The alias is the queue's stable application identity. It is the key in
 | Setting | Applies to | Meaning |
 | --- | --- | --- |
 | `BACKEND` | All queues; required | Dotted class path for the queue backend. It selects both the semantic kind (`AsyncQueue` or `EventQueue`) and storage provider. |
-| `LOCATION` | All queues | Backend location. Standalone Redis backends require a Redis URL such as `redis://localhost:6379/12`. Redis Cluster backends require a database-`0` seed URL such as `redis://localhost:6379/0`. Memory backends ignore it and may omit it. |
+| `LOCATION` | All queues | Backend location. Standalone Redis backends require a Redis URL such as `redis://localhost:6379/12` or `rediss://localhost:6379/12` for TLS. Redis Cluster backends require a database-`0` seed URL. Memory backends ignore it and may omit it. |
 | `HANDLER` | Async queues only | Dotted path to the async callable that handles entries. Its presence opts that alias into `manage.py runqueues`; it is not passed to the backend. Event queues reject it because they use listeners. |
 | `WORKER` | Optional | Compatible concrete worker class or dotted class path. Omit it to use the backend's default; Redis and memory workers are provider-specific. |
 | `ENTRY_CLASS` | Optional | `QueueEntry` subclass or dotted class path used for queue entries. It defaults to `QueueEntry`; extra fields must be JSON-serialisable. |
@@ -179,6 +207,11 @@ Built-in backend options are deliberately small:
 | `maxsize` | Memory and Redis raw-value operations | Maximum number of values accepted by `add`; `0` (the default) is unbounded. |
 | `stack` | Redis queues and memory async queues | Use LIFO ordering instead of FIFO. Prefer the explicit `RedisAsyncStack` backend where one exists. |
 | `encoding` | Redis queues | Python codec used for raw Redis values; defaults to UTF-8. |
+| `ssl_ca_certs` | Redis queues with `rediss://` | CA bundle used to verify the Redis server certificate. Omit it when the issuer is already in the system trust store. |
+| `ssl_certfile` / `ssl_keyfile` | Redis queues with `rediss://` | Optional client certificate and key for mutual TLS. |
+| `ssl_cert_reqs` | Redis queues with `rediss://` | Certificate requirement (`required` by default). |
+| `ssl_check_hostname` | Redis queues with `rediss://` | Hostname verification (`True` by default). |
+| `address_remap` | Redis Cluster queues | Callable `(host, port) -> (host, port)` that maps advertised Cluster node addresses to addresses the client can reach (NAT, Docker published ports). Not a TLS setting; Cluster backends apply it as an overlay on the seed client. |
 
 Custom backends may document additional options. Queue metadata (`HANDLER`,
 `WORKER`, `ENTRY_CLASS`, `TIMEOUT`, and `RETENTION_TIMEOUT`) is consumed by

@@ -14,6 +14,7 @@ from django_queue.backends.redis.functions import (
     FUNCTION_LIBRARY_NAME,
     load_function_library,
 )
+from django_queue.backends.redis.transport import redis_from_url_location
 from django_queue.management.redis_functions import (
     DEPLOYMENT_LOCK_KEY,
     REDIS_TOPOLOGY_CLUSTER,
@@ -22,6 +23,7 @@ from django_queue.management.redis_functions import (
     cluster_node_ids,
     deployment_lock_key,
     iter_cluster_primary_clients,
+    raise_redis_command_error,
     read_installed_library_info,
     resolve_redis_targets,
     warn_duplicate_cluster_seeds,
@@ -107,15 +109,17 @@ class Command(BaseCommand):
         self, target, *, library, deploy: bool, rollback: bool
     ) -> None:
         try:
-            client = redis.Redis.from_url(target.url)
+            client = redis.Redis.from_url(
+                redis_from_url_location(target.url), **target.client_kwargs
+            )
         except (redis.RedisError, ValueError) as exc:
-            raise CommandError(f"Redis Function check failed: {exc}") from exc
+            raise_redis_command_error(exc, target.url, "Redis Function check failed")
         try:
             self._process_client(
                 client, library=library, deploy=deploy, rollback=rollback
             )
         except redis.RedisError as exc:
-            raise CommandError(f"Redis Function check failed: {exc}") from exc
+            raise_redis_command_error(exc, target.url, "Redis Function check failed")
         finally:
             client.close()
 
@@ -130,10 +134,10 @@ class Command(BaseCommand):
     ) -> None:
         try:
             cluster = RedisCluster.from_url(
-                target.url, **cluster_from_url_kwargs(target)
+                redis_from_url_location(target.url), **cluster_from_url_kwargs(target)
             )
         except (redis.RedisError, ValueError, TypeError) as exc:
-            raise CommandError(f"Redis Function check failed: {exc}") from exc
+            raise_redis_command_error(exc, target.url, "Redis Function check failed")
         try:
             try:
                 cluster_identities.append((target.url, cluster_node_ids(cluster)))
@@ -152,9 +156,11 @@ class Command(BaseCommand):
                         lock_key=deployment_lock_key(cluster, node),
                     )
                 except redis.RedisError as exc:
-                    raise CommandError(
-                        f"Redis Function check failed on {advertised}: {exc}"
-                    ) from exc
+                    raise_redis_command_error(
+                        exc,
+                        target.url,
+                        f"Redis Function check failed on {advertised}",
+                    )
                 finally:
                     client.close()
             if not found:

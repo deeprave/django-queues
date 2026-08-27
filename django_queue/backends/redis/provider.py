@@ -33,6 +33,11 @@ from django_queue.backends.exceptions import (
     QueueValueError,
 )
 from django_queue.backends.redis.functions import FUNCTION_API_VERSION
+from django_queue.backends.redis.transport import (
+    redis_client_kwargs,
+    redis_from_url_location,
+    redis_tls_failure,
+)
 from django_queue.clock import (
     MICROSECONDS_PER_SECOND,
     QueueClock,
@@ -92,7 +97,12 @@ class _RedisClockFacade:
         return async_to_sync(self._anow_and_close)()
 
     async def anow(self):
-        return await self._provider._async_clock().anow()
+        try:
+            return await self._provider._async_clock().anow()
+        except Exception as exc:
+            if tls_error := redis_tls_failure(exc, self._provider._redis_url):
+                raise tls_error from exc
+            raise
 
     async def _anow_and_close(self):
         try:
@@ -159,6 +169,7 @@ class QueueProviderRedis:
                 "A Redis client with decode_responses cannot use a non-UTF-8 queue encoding"
             )
         self._redis_url = redis_url
+        self._client_kwargs = redis_client_kwargs(redis_url, options)
         self.entry_class = entry_class
         self._queue_alias = validate_queue_alias(
             options.get("queue_name", f"queue_{uuid.uuid4().hex}")
@@ -187,7 +198,9 @@ class QueueProviderRedis:
         self._clock: QueueClock = _RedisClockFacade(self)
 
     def _create_async_client(self) -> Any:
-        return async_redis.from_url(self._redis_url)
+        return async_redis.from_url(
+            redis_from_url_location(self._redis_url), **self._client_kwargs
+        )
 
     def _function_info_keys(self) -> tuple[str, ...]:
         return ()
@@ -368,6 +381,8 @@ class QueueProviderRedis:
                 "django_queue_info", len(keys), *keys
             )
         except redis.RedisError as exc:
+            if tls_error := redis_tls_failure(exc, self._redis_url):
+                raise tls_error from exc
             raise InvalidQueueBackendError(
                 "Redis Function library is unavailable or FCALL is denied; run "
                 "redis_lua_compat with the application credentials. If the library "
@@ -400,6 +415,8 @@ class QueueProviderRedis:
         try:
             return await self._async_redis().fcall(function, numkeys, *args)
         except redis.RedisError as exc:
+            if tls_error := redis_tls_failure(exc, self._redis_url):
+                raise tls_error from exc
             raise InvalidQueueBackendError(
                 f"Redis Function {function} failed: {exc}"
             ) from exc
@@ -409,19 +426,24 @@ class QueueProviderRedis:
         client = await self._prepare_async_client(self._create_async_client())
         pubsub = client.pubsub(ignore_subscribe_messages=True)
         try:
-            await pubsub.subscribe(self.lifecycle_channel)
-            async for message in pubsub.listen():
-                if message["type"] != "message":
-                    continue
-                try:
-                    entry = self.entry_class.from_dict(json.loads(message["data"]))
-                except Exception:
-                    logger.exception(
-                        "Ignoring invalid queue lifecycle snapshot",
-                        extra={"queue": self._queue_alias},
-                    )
-                    continue
-                on_snapshot(entry)
+            try:
+                await pubsub.subscribe(self.lifecycle_channel)
+                async for message in pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+                    try:
+                        entry = self.entry_class.from_dict(json.loads(message["data"]))
+                    except Exception:
+                        logger.exception(
+                            "Ignoring invalid queue lifecycle snapshot",
+                            extra={"queue": self._queue_alias},
+                        )
+                        continue
+                    on_snapshot(entry)
+            except Exception as exc:
+                if tls_error := redis_tls_failure(exc, self._redis_url):
+                    raise tls_error from exc
+                raise
         finally:
             await pubsub.aclose()
             await self._aclose_client(client)
@@ -1155,10 +1177,12 @@ class QueueProviderRedisCluster(QueueProviderRedis):
             )
 
     def _create_async_client(self) -> Any:
-        kwargs: dict[str, Any] = {}
+        kwargs = dict(self._client_kwargs)
         if self._address_remap is not None:
             kwargs["address_remap"] = self._address_remap
-        return AsyncRedisCluster.from_url(self._redis_url, **kwargs)
+        return AsyncRedisCluster.from_url(
+            redis_from_url_location(self._redis_url), **kwargs
+        )
 
     def _function_info_keys(self) -> tuple[str, ...]:
         return (self._queue_name,)

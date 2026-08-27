@@ -1,8 +1,8 @@
 ## Purpose
 
 Define encrypted Redis transport for standalone and Cluster queue backends,
-including native TLS, TLS terminators such as stunnel, and uniform use of those
-settings on every connection the package opens.
+including native TLS and uniform use of those settings on every connection the
+package opens.
 
 ## ADDED Requirements
 
@@ -68,23 +68,8 @@ options supplied.
 - **THEN** the observer connection uses the same encrypted transport settings
   as the queue's provider client
 
-### Requirement: Treat a TLS terminator as equivalent encrypted transport
-A TLS terminator in front of Redis, including stunnel, SHALL be a supported
-deployment when every Redis address the client dials is the terminator's TLS
-listener. The client SHALL use the `rediss://` contract against that listener
-and SHALL NOT spawn or manage the terminator process. For Redis Cluster, the
-topology advertisement MUST present those TLS listener addresses; a terminator
-in front of only the seed SHALL NOT be sufficient if discovered nodes advertise
-plaintext Redis ports.
-
-#### Scenario: Reach standalone Redis through stunnel
-- **WHEN** a standalone Redis backend uses a `rediss://` LOCATION that points
-  at a stunnel TLS listener wrapping a plaintext Redis
-- **THEN** queue operations succeed over the encrypted terminator connection
-
-#### Scenario: Reject Cluster discovery that bypasses the terminator
-- **WHEN** a Cluster seed is a TLS terminator but discovered node addresses are
-  plaintext Redis ports the client cannot use with the configured encrypted
-  transport
+#### Scenario: Reject Cluster discovery that cannot use the configured TLS
+- **WHEN** a Cluster seed uses `rediss://` but discovered node addresses cannot
+  be dialed with those encrypted transport settings
 - **THEN** topology use fails with an actionable error rather than silently
   opening plaintext connections to those nodes
