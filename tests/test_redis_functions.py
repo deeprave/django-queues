@@ -43,6 +43,10 @@ _FUNCTION_NAMES = (
     "django_queue_recover_priority",
     "django_queue_claim",
     "django_queue_claim_priority",
+    "django_queue_notification_store",
+    "django_queue_notification_get",
+    "django_queue_notification_expire",
+    "django_queue_notification_clear",
 )
 
 
@@ -152,6 +156,22 @@ def test_library_documents_every_public_function_registration():
     )
     assert source.count(". Args:") == len(_FUNCTION_NAMES)
     assert source.count(". Returns:") == len(_FUNCTION_NAMES)
+
+
+def test_notification_functions_are_named_as_a_grouped_api():
+    source = load_function_library().source.decode("utf-8")
+
+    assert "django_queue_notification_store" in source
+    assert "django_queue_notification_get" in source
+    assert "django_queue_notification_expire" in source
+    assert "django_queue_notification_clear" in source
+    assert "flags = {'no-writes'}" in source
+    assert FUNCTION_API_VERSION == 1
+    assert "django_queue_expire" in source
+    assert "django_queue_store_notification" not in source
+    assert "django_queue_get_notification" not in source
+    assert "django_queue_expire_notification" not in source
+    assert "django_queue_clear_notification" not in source
 
 
 def test_provider_does_not_create_an_evalsha_script_cache():

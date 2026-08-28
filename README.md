@@ -6,7 +6,7 @@
 
 # Django Queues
 
-This is an implementation of task/async and event queues for Django.
+This is an implementation of task/async, event, and notification queues for Django.
 
 It supports memory-backed queues and Redis-backed queues on standalone Redis or Redis Cluster, including encrypted (`rediss://`) connections. Redis-backed queues use Redis Functions for atomic updates.
 
@@ -21,11 +21,14 @@ Choose the semantic queue type first; choose its memory or Redis backend second.
 | Choose | Use it for | Classes | Consumer model | Retention |
 | --- | --- | --- | --- | --- |
 | **Async queue** | Work that runs later and whose progress or outcome must be inspectable | `MemoryAsyncQueue`, `RedisAsyncQueue`, `RedisClusterAsyncQueue`, and their stack/priority variants | An async `HANDLER`, normally run by `manage.py runqueues` | A durable lifecycle: `queued`, `running`, then `succeeded`, `failed`, or `timeout` until pruning |
-| **Event queue** | Short-lived notifications delivered to one or more local listeners | `MemoryEventQueue`, `RedisEventQueue`, `RedisClusterEventQueue` | `@queue_listener`; Django starts the queue runtime once at process startup when at least one queue is configured | Consumed, retried, or expired; no durable outcome record |
+| **Event queue** | Distributed processing: a worker claims an event and thereafter owns it | `MemoryEventQueue`, `RedisEventQueue`, `RedisClusterEventQueue` | `@queue_listener`; Django starts the queue runtime once at process startup when at least one queue is configured | Consumed, retried, or expired; no durable outcome record |
+| **Notification queue** | Owner-less seeing: every connected process that sees a payload may handle it; none owns it | `MemoryNotificationQueue`, `RedisNotificationQueue`, `RedisClusterNotificationQueue` | `@queue_listener`; Django starts the queue runtime once at process startup when at least one queue is configured | Sender-set lifetime, then worker expiry; not a rewindable stream |
 
 Async queues are the correct choice when a producer needs to determine a result, observe lifecycle progress, or retain completed work temporarily.
 
-Event queues are for streaming data in "fan-out" fashion to one or more consumers, and no result needs to be retrieved afterwards.
+Event queues are for distributed processing: a worker that claims an event thereafter owns it, and other workers do not treat that event as theirs. No result needs to be retrieved afterwards.
+
+Notification queues are for see-but-do-not-own delivery. Every connected receiver that sees the payload may handle it. A process that was not connected at publish is not required to catch up.
 
 ## Backend choices
 
@@ -33,7 +36,7 @@ There are three backend families:
 
 - **Memory** queues exist only while the application process runs. Configured
   `MemoryAsyncQueue` instances are local to the resolving process and thread;
-  `MemoryEventQueue` is process-scoped.
+  `MemoryEventQueue` and `MemoryNotificationQueue` are process-scoped.
 - **Redis** queues are shared and persistent on a standalone Redis instance.
   Use them when producers and consumers run in different processes, containers,
   or hosts. Install support with `pip install "django-queues[redis]"`.
@@ -41,7 +44,7 @@ There are three backend families:
   Cluster topology. Select a `RedisCluster*` backend; ordinary Redis backends
   do not detect or switch to Cluster mode.
 
-FIFO, LIFO stack, and priority ordering are available for async queues. Event queues use their selected backend's transient delivery semantics.
+FIFO, LIFO stack, and priority ordering are available for async queues. Event queues and notification queues use their selected backend's transient delivery semantics.
 
 ## Configuration
 
@@ -67,7 +70,7 @@ This configures a Redis-backed FIFO async queue with JSON values. Redis-backed q
 
 For a LIFO stack, use `django_queue.backends.redis.RedisAsyncStackJson`, or add `"stack": True`. Cluster has matching `RedisClusterAsyncStack` backends.
 
-All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`. Initialisation constructs queue services; it does not start an async `runqueues` worker. Configured event queues start their workers with the process-wide runtime described under [Event queues](#event-queues). Queue aliases may contain only ASCII letters, digits, `_`, and `-`.
+All aliases are validated and initialised when Django starts. Application code can retrieve a configured queue through `queues["alias"]`. Initialisation constructs queue services; it does not start an async `runqueues` worker. Configured event queues and notification queues start their workers and receivers with the process-wide runtime described under [Event queues](#event-queues) and [Notification queues](#notification-queues). Queue aliases may contain only ASCII letters, digits, `_`, and `-`.
 
 ### Redis Cluster
 
@@ -106,7 +109,7 @@ A Cluster alias is the same pattern with a `RedisCluster*` backend and a `rediss
 
 ### Event queues
 
-`MemoryEventQueue`, `RedisEventQueue`, and `RedisClusterEventQueue` deliver short-lived events to local listeners instead of retaining async-work outcomes. Configure one explicitly, then register one or more listeners in application code:
+`MemoryEventQueue`, `RedisEventQueue`, and `RedisClusterEventQueue` deliver short-lived events as distributed processing: a worker that claims an event thereafter owns it. Configure one explicitly, then register one or more listeners in application code:
 
 ```python
 # settings.py
@@ -132,7 +135,36 @@ async def send_notification(entry):
 
 An eligible listener returning `True` consumes and removes the event. Returning `False` logs a rejection and also removes it; returning `None` lets the next listener see it. If every listener passes, or a filter/listener raises, the event is released for a short delayed retry. Events expire unconsumed after an entry-specific `timeout_seconds`, the queue `TIMEOUT`, or 60 seconds by default. They never acquire a task result or terminal entry record.
 
-Django starts one process-local queue runtime once, at process startup, when `QUEUES` is non-empty. It owns one background thread and one asyncio loop, shared by every configured event queue's worker task and every observed async queue's Redis receiver task. An alias may set `WORKER` to an event-worker subclass compatible with the selected backend: memory event queues require a subclass of their memory-aware worker and Redis event queues require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata is invalid because listeners provide event dispatch. Memory event queues are local to that process. Redis workers use claims so processes compete for one active delivery, but ordering remains indeterminate across multiple listeners, processes, or retries. Use one listener in one process when strict ordering is required. An active Redis listener renews its claim while it runs; if its worker stops before settling the event, a later dispatcher recovers the expired claim for redelivery. The runtime retries an event dispatcher that stops from an infrastructure failure with bounded backoff.
+Django starts one process-local queue runtime once, at process startup, when `QUEUES` is non-empty. It owns one background thread and one asyncio loop, shared by every configured event queue's worker task, every notification queue's receiver task, and every observed async queue's Redis receiver task. An alias may set `WORKER` to an event-worker subclass compatible with the selected backend: memory event queues require a subclass of their memory-aware worker and Redis event queues require a subclass of their Redis-aware worker. Async-queue `HANDLER` metadata is invalid because listeners provide event dispatch. Memory event queues are local to that process. Redis workers use claims so processes compete for one active delivery, but ordering remains indeterminate across multiple listeners, processes, or retries. Use one listener in one process when strict ordering is required. An active Redis listener renews its claim while it runs; if its worker stops before settling the event, a later dispatcher recovers the expired claim for redelivery. The runtime retries an event dispatcher that stops from an infrastructure failure with bounded backoff.
+
+### Notification queues
+
+`MemoryNotificationQueue`, `RedisNotificationQueue`, and `RedisClusterNotificationQueue` publish owner-less notifications. Every connected process that sees a payload may handle it; none owns it. There is no claim, release, or consume-remove. A process without an active receiver at publish is not required to catch up: this is not a rewindable stream.
+
+```python
+# settings.py
+QUEUES = {
+    "notices": {
+        "BACKEND": "django_queue.backends.redis.RedisNotificationQueue",
+        "LOCATION": "redis://localhost:6379/12",
+    },
+}
+
+
+# myproject/listeners.py
+from django_queue import queue_listener
+
+
+@queue_listener("notices")
+async def broadcast(entry):
+    await notify(entry.payload)
+```
+
+`RedisClusterNotificationQueue` takes a database-`0` seed. Encrypted Redis uses `rediss://` the same way as async queues.
+
+Every eligible local `@queue_listener` on a process that saw the notification runs. Filters still skip. Listener return values do not consume the notification and do not confer ownership. An exception in one local listener is logged and does not prevent siblings from running. The sender sets remaining lifetime (`timeout_seconds` or queue `TIMEOUT`, default 60 seconds). The notification worker expires at most one due stored copy per service tick so seeing stays on the clock; `find` / `afind` may still succeed after that lifetime until the worker reaches that copy. Redis stored reads are GET-only (they observe a short-lived removal lease if expiry is in progress). Memory expiry deletes under the provider lock and does not use a lease.
+
+Django hosts one notification receiver per alias on the same process-wide runtime as event workers. Memory notification queues deliver only inside the publishing process. Redis and Cluster backends publish so every connected receiver can see the payload.
 
 ### Required Redis initialisation
 
@@ -211,13 +243,13 @@ The alias is the queue's stable application identity. It is the key in
 
 | Setting | Applies to | Meaning |
 | --- | --- | --- |
-| `BACKEND` | All queues; required | Dotted class path for the queue backend. It selects both the semantic kind (`AsyncQueue` or `EventQueue`) and storage provider. |
+| `BACKEND` | All queues; required | Dotted class path for the queue backend. It selects both the semantic kind (`AsyncQueue`, `EventQueue`, or `NotificationQueue`) and storage provider. |
 | `LOCATION` | All queues | Backend location. Standalone Redis backends require a Redis URL such as `redis://localhost:6379/12` or `rediss://localhost:6379/12` for TLS. Redis Cluster backends require a database-`0` seed URL. Memory backends ignore it and may omit it. |
-| `HANDLER` | Async queues only | Dotted path to the async callable that handles entries. Its presence opts that alias into `manage.py runqueues`; it is not passed to the backend. Event queues reject it because they use listeners. |
+| `HANDLER` | Async queues only | Dotted path to the async callable that handles entries. Its presence opts that alias into `manage.py runqueues`; it is not passed to the backend. Event queues and notification queues reject it because they use listeners. |
 | `WORKER` | Optional | Compatible concrete worker class or dotted class path. Omit it to use the backend's default; Redis and memory workers are provider-specific. |
 | `ENTRY_CLASS` | Optional | `QueueEntry` subclass or dotted class path used for queue entries. It defaults to `QueueEntry`; extra fields must be JSON-serialisable. |
-| `TIMEOUT` | All queues | For an async queue, the default execution budget for its handlers (600 seconds when unset). For an event queue, the unclaimed event lifetime (60 seconds when unset). An entry-specific `timeout_seconds` takes precedence. |
-| `RETENTION_TIMEOUT` | Async queues only | Terminal-record retention in seconds. Defaults to 600; set to `None` to disable automatic cleanup. Event queues do not retain terminal records. |
+| `TIMEOUT` | All queues | For an async queue, the default execution budget for its handlers (600 seconds when unset). For an event queue or notification queue, the stored lifetime (60 seconds when unset). An entry-specific `timeout_seconds` takes precedence. |
+| `RETENTION_TIMEOUT` | Async queues only | Terminal-record retention in seconds. Defaults to 600; set to `None` to disable automatic cleanup. Event queues and notification queues do not retain terminal records. |
 
 Built-in backend options are deliberately small:
 
@@ -254,7 +286,7 @@ QUEUES = {
 
 `HANDLER` must resolve to an asynchronous callable. `runqueues` imports each configured handler at startup, waits until that queue has work, then creates its configured worker and passes the handler to it. A queue without `HANDLER` remains producer-only until application code supplies another worker.
 
-`WORKER` and `ENTRY_CLASS` each accept either a class object or a dotted import path. Each backend selects a provider-compatible default worker: memory async and event queues use memory-aware workers, while Redis async and event queues use Redis-aware workers that manage transport delivery internally. `AsyncQueueWorker` and `EventQueueWorker` are orchestration bases, not default workers for every backend. A configured async-queue worker must be compatible with its backend's selected worker type and use the normal queue-lookup and handler-mapping constructor. A queue constructs its worker with its own clock, so a subclass that overrides `__init__` must accept a `clock` keyword and pass it to `super().__init__`, or accept `**kwargs` and forward them. Django validates and imports entry and worker types during queue configuration. A worker is constructed only when its queue first becomes active; an entry only when it is enqueued, restored, or updated.
+`WORKER` and `ENTRY_CLASS` each accept either a class object or a dotted import path. Each backend selects a provider-compatible default worker: memory async, event, and notification queues use memory-aware workers, while Redis async, event, and notification queues use Redis-aware workers that manage transport delivery internally. `AsyncQueueWorker`, `EventQueueWorker`, and `NotificationQueueWorker` are orchestration bases, not default workers for every backend. A configured async-queue worker must be compatible with its backend's selected worker type and use the normal queue-lookup and handler-mapping constructor. A queue constructs its worker with its own clock, so a subclass that overrides `__init__` must accept a `clock` keyword and pass it to `super().__init__`, or accept `**kwargs` and forward them. Django validates and imports entry and worker types during queue configuration. A worker is constructed only when its queue first becomes active; an entry only when it is enqueued, restored, or updated.
 
 `RETENTION_TIMEOUT` controls how long terminal entry records remain available. A running worker removes expired terminal records during its normal loop. `prune(entry_id)` and `await aprune(entry_id)` remove one terminal record immediately.
 
@@ -378,7 +410,7 @@ assert entry.status == "queued"
 
 ### Lifecycle observation
 
-Use `queue_observer` for best-effort, passive async-queue monitoring. A subscription receives immutable entry snapshots from an async-queue worker; it cannot affect async-queue execution.
+Use `queue_observer` for best-effort, passive async-queue monitoring. A subscription receives immutable entry snapshots from an async-queue worker; it cannot affect async-queue execution. It is AsyncQueue-only: registering against an `EventQueue` or `NotificationQueue` is rejected.
 
 ```python
 from django_queue import queue_observer
@@ -604,12 +636,16 @@ Lifecycle transitions are worker-internal. `enqueue` emits Django's `entry_enque
 
 `EventQueue` uses `enqueue` / `aenqueue` to create a transient event, `find` / `afind` to inspect one live event, and `dequeue` / `adequeue` for direct consumption. It deliberately has no `list` or `prune` lifecycle API: event records are consumed or expire without a terminal outcome, and listeners receive them through `@queue_listener`.
 
+### NotificationQueue delivery API
+
+`NotificationQueue` uses `enqueue` / `aenqueue` to publish a payload and `find` / `afind` to inspect one live stored notification until worker expiry. `has_pending` / `ahas_pending` report whether any stored copy remains. `clear` / `aclear` also drop stored notifications. `dequeue` / `adequeue` raise: there is no consume-remove API. Connected receivers see the payload through `@queue_listener`, and none of them owns it.
+
 ### Exceptions
 
 - `InvalidQueueBackendError`: invalid Django `QUEUES` configuration.
 - `QueueFullException` and `QueueEmptyException`: raw-value capacity or
   availability errors.
-- `QueueEntryNotFoundError`: `find` or `prune` requested a retained record
+- `QueueEntryNotFoundError`: `find` or `prune` requested a record
   that no longer exists.
 - `QueueEntryMissingError`: an internal worker/provider recovery condition:
   a previously claimed record disappeared unexpectedly.

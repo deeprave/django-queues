@@ -1,8 +1,8 @@
 #!lua name=django_queues
--- django-queues-library-version: 260826_110000
+-- django-queues-library-version: 260827_204500
 -- django-queues-api-version: 1
 
-local library_version = "260826_110000"
+local library_version = "260827_204500"
 local api_version = 1
 
 local function register_function(name, description, callback)
@@ -606,3 +606,44 @@ redis.register_function{
         return {'conflict', entry_id}
     end,
 }
+
+register_function('django_queue_notification_store', 'Keys: notification record, deadline ZSET. Args: entry JSON, entry ID, lifetime in microseconds, Pub/Sub channel. Returns: no value. Stores a notification, indexes its Redis TIME deadline, and publishes so connected receivers can see it.', function(keys, args)
+    local now = redis.call('TIME')
+    local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])
+    redis.call('SET', keys[1], args[1])
+    redis.call('ZADD', keys[2], now_us + tonumber(args[3]), args[2])
+    redis.call('PUBLISH', args[4], args[1])
+end)
+
+redis.register_function{
+    function_name = 'django_queue_notification_get',
+    description = 'Keys: removal-lease record, notification record. Args: none. Returns: entry JSON when live, otherwise nil. GET-only: never SET.',
+    flags = {'no-writes'},
+    callback = function(keys, args)
+        if redis.call('GET', keys[1]) then return nil end
+        return redis.call('GET', keys[2])
+    end,
+}
+
+register_function('django_queue_notification_expire', 'Keys: deadline ZSET, removal-lease key prefix, notification-record key prefix. Args: lease PX milliseconds. Returns: expired entry ID, or nil when the earliest member is not due.', function(keys, args)
+    local now = redis.call('TIME')
+    local now_us = tonumber(now[1]) * 1000000 + tonumber(now[2])
+    local earliest = redis.call('ZRANGE', keys[1], 0, 0, 'WITHSCORES')
+    if #earliest == 0 then return nil end
+    local entry_id = earliest[1]
+    if tonumber(earliest[2]) > now_us then return nil end
+    redis.call('SET', keys[2] .. entry_id, '1', 'PX', tonumber(args[1]))
+    redis.call('DEL', keys[3] .. entry_id)
+    redis.call('ZREM', keys[1], entry_id)
+    return entry_id
+end)
+
+register_function('django_queue_notification_clear', 'Keys: deadline ZSET, removal-lease key prefix, notification-record key prefix. Args: none. Returns: no value. Deletes every indexed notification, its lease, and the deadline index.', function(keys, args)
+    local members = redis.call('ZRANGE', keys[1], 0, -1)
+    for i = 1, #members do
+        local entry_id = members[i]
+        redis.call('DEL', keys[2] .. entry_id)
+        redis.call('DEL', keys[3] .. entry_id)
+    end
+    redis.call('DEL', keys[1])
+end)

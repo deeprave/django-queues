@@ -3,6 +3,7 @@ import inspect
 import os
 import shutil
 import tempfile
+import warnings
 from pathlib import Path
 from subprocess import CalledProcessError
 
@@ -88,10 +89,14 @@ try:
 
     @pytest.fixture(scope="module")
     def redis_raw_client(redis_container):
-        return redis.Redis(
+        client = redis.Redis(
             host=redis_container.get_container_host_ip(),
             port=redis_container.get_exposed_port(6379),
         )
+        try:
+            yield client
+        finally:
+            client.close()
 
     @pytest.fixture(scope="module")
     def redis_function_library(redis_raw_client):
@@ -298,6 +303,26 @@ def _slow_tests_enabled():
     return os.getenv("SLOW_TESTS") in ("true", "1", "enabled")
 
 
+def _ignore_docker_unix_socket_warnings() -> None:
+    """Ignore leftover Docker daemon AF_UNIX sockets under ``-Werror``.
+
+    Command-line ``-Werror`` is applied after ini filters and wins, so this
+    must be re-installed inside pytest's per-test ``catch_warnings`` as well
+    as at session boundaries. Family 1 is AF_UNIX; leaked Redis TCP sockets
+    stay errors.
+    """
+    warnings.filterwarnings(
+        "ignore",
+        message=r"unclosed <socket\.socket fd=\d+, family=1, type=1, proto=0>",
+        category=ResourceWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Exception ignored while finalizing socket.*family=1, type=1, proto=0",
+        category=pytest.PytestUnraisableExceptionWarning,
+    )
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "slow: mark test as slow (skipped unless SLOW_TESTS=true/1/enabled)"
@@ -307,3 +332,25 @@ def pytest_configure(config):
         not _slow_tests_enabled(),
         reason="Test skipped because SLOW_TESTS environment variable not set to true, 1 or enabled",
     )
+    _ignore_docker_unix_socket_warnings()
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item):
+    _ignore_docker_unix_socket_warnings()
+    return (yield)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_unconfigure(config):
+    _ignore_docker_unix_socket_warnings()
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Close testcontainers' Ryuk Docker client at session end."""
+    _ignore_docker_unix_socket_warnings()
+    try:
+        from testcontainers.core.container import Reaper
+    except ImportError:
+        return
+    Reaper.delete_instance()

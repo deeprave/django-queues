@@ -26,6 +26,7 @@ from django_queue.backends.redis import (
     RedisClusterAsyncStack,
     RedisClusterAsyncStackJson,
     RedisClusterEventQueue,
+    RedisClusterNotificationQueue,
 )
 from django_queue.backends.redis.provider import (
     QueueProviderRedis,
@@ -53,6 +54,7 @@ _CLUSTER_BACKENDS = (
     "django_queue.backends.redis.RedisClusterAsyncPriorityQueue",
     "django_queue.backends.redis.RedisClusterAsyncPriorityQueueJson",
     "django_queue.backends.redis.RedisClusterEventQueue",
+    "django_queue.backends.redis.RedisClusterNotificationQueue",
 )
 
 
@@ -137,6 +139,11 @@ def test_standalone_provider_still_constructs_a_standalone_client():
 def test_cluster_backend_rejects_a_non_zero_database():
     with pytest.raises(InvalidQueueBackendError, match="database 0"):
         RedisClusterAsyncQueue("redis://localhost:6379/1", queue_name="jobs")
+
+
+def test_cluster_notification_backend_rejects_a_non_zero_database():
+    with pytest.raises(InvalidQueueBackendError, match="database 0"):
+        RedisClusterNotificationQueue("redis://localhost:6379/1", queue_name="notices")
 
 
 def test_cluster_backend_accepts_database_zero():
@@ -712,6 +719,9 @@ def test_cluster_fifo_stack_priority_json_and_events_match_standalone_semantics(
         events = _cluster_queue(
             RedisClusterEventQueue, redis_cluster_url, redis_cluster_remap
         )
+        notices = _cluster_queue(
+            RedisClusterNotificationQueue, redis_cluster_url, redis_cluster_remap
+        )
         try:
             await fifo.aadd("a", "b")
             assert await fifo.aget() == "a"
@@ -740,6 +750,11 @@ def test_cluster_fifo_stack_priority_json_and_events_match_standalone_semantics(
             assert delivered.id == event_id
             with pytest.raises(QueueEntryNotFoundError):
                 await events.afind(event_id)
+
+            notice_id = await notices.aenqueue("broadcast")
+            stored = await notices.afind(notice_id)
+            assert stored.payload == "broadcast"
+            assert stored.id == notice_id
         finally:
             await fifo.aclose()
             await stack.aclose()
@@ -747,6 +762,46 @@ def test_cluster_fifo_stack_priority_json_and_events_match_standalone_semantics(
             await json_queue.aclose()
             await json_stack.aclose()
             await events.aclose()
+            await notices.aclose()
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.slow
+def test_cluster_notification_receiver_dispatches(
+    redis_cluster_url, redis_cluster_remap, monkeypatch
+):
+    from django_queue.backends.redis import RedisNotificationQueueWorker
+    from django_queue.listeners import ListenerRegistration
+
+    received = []
+
+    async def receive(entry):
+        received.append(entry.payload)
+
+    async def exercise():
+        queue = _cluster_queue(
+            RedisClusterNotificationQueue, redis_cluster_url, redis_cluster_remap
+        )
+        monkeypatch.setattr(
+            "django_queue.notification_worker.listeners_for",
+            lambda alias: (
+                (ListenerRegistration(receive),) if alias == queue.queue_name else ()
+            ),
+        )
+        worker = RedisNotificationQueueWorker(
+            queue, alias=queue.queue_name, idle_delay=0.05
+        )
+        try:
+            await worker._ensure_subscribed()
+            await queue.aenqueue("cluster-notice")
+            deadline = asyncio.get_running_loop().time() + 2
+            while not received and asyncio.get_running_loop().time() < deadline:
+                await worker.adispatch_once()
+            assert received == ["cluster-notice"]
+        finally:
+            await worker._aclose_pubsub()
+            await queue.aclose()
 
     asyncio.run(exercise())
 

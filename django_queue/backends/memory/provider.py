@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import queue
+from collections import deque
 from threading import RLock
 from uuid import UUID
 
@@ -47,6 +48,9 @@ class QueueProviderMemory:
         self._scheduled: dict[UUID, ClockTime] = {}
         self._unclaimed_deadlines: dict[UUID, ClockTime] = {}
         self._unclaimed_remaining: dict[UUID, float] = {}
+        self._notification_entries: dict[UUID, QueueEntry] = {}
+        self._notification_deadlines: dict[UUID, ClockTime] = {}
+        self._notification_seen: deque[QueueEntry] = deque()
 
     @property
     def clock(self) -> QueueClock:
@@ -514,3 +518,52 @@ class QueueProviderMemory:
         self._unclaimed_deadlines.pop(entry_id, None)
         self._unclaimed_remaining.pop(entry_id, None)
         self._remove_pending(entry_id)
+
+    async def astore_notification(self, entry: QueueEntry) -> None:
+        if entry.timeout_seconds is None:
+            raise ValueError("Notification entries require a resolved lifetime")
+        with self._lock:
+            self._notification_entries[entry.id] = entry
+            self._notification_deadlines[entry.id] = (
+                entry.queued_at + entry.timeout_seconds
+            )
+            self._notification_seen.append(entry)
+
+    async def aget_notification(self, entry_id: UUID) -> QueueEntry:
+        with self._lock:
+            entry = self._notification_entries.get(entry_id)
+            if entry is None:
+                raise QueueEntryNotFoundError(entry_id)
+            return entry
+
+    async def ahas_notification(self) -> bool:
+        with self._lock:
+            return bool(self._notification_entries)
+
+    async def asee_next_notification(self) -> QueueEntry | None:
+        with self._lock:
+            if not self._notification_seen:
+                return None
+            return self._notification_seen.popleft()
+
+    async def aexpire_due_notifications(self) -> list[UUID]:
+        now = await self.clock.anow()
+        with self._lock:
+            due = [
+                entry_id
+                for entry_id, deadline in self._notification_deadlines.items()
+                if deadline <= now
+            ]
+            if not due:
+                return []
+            due.sort(key=lambda entry_id: self._notification_deadlines[entry_id])
+            entry_id = due[0]
+            self._notification_entries.pop(entry_id, None)
+            self._notification_deadlines.pop(entry_id, None)
+            return [entry_id]
+
+    async def aclear_notifications(self) -> None:
+        with self._lock:
+            self._notification_entries.clear()
+            self._notification_deadlines.clear()
+            self._notification_seen.clear()

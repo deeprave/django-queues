@@ -17,7 +17,8 @@ default worker behaviour.
 #### Scenario: Construct a Redis notification queue
 - **WHEN** an application constructs `RedisNotificationQueue`
 - **THEN** it receives a `NotificationQueue` semantic facade composed with a
-  Redis provider and a Redis-aware notification worker that does not claim
+  Redis provider and a Redis-aware notification worker that does not
+  claim, release, or consume-remove
 
 #### Scenario: Use a queue-facing API
 - **WHEN** application code produces, reads, or administers queue entries
@@ -40,7 +41,9 @@ worker SHALL implement delivery using its provider's native model.
 
 #### Scenario: Redis notification delivery
 - **WHEN** a Redis notification worker dispatches a payload
-- **THEN** it does not take a claim or renew a lease in order to deliver it
+- **THEN** it does not take an ownership claim, release, or consume-remove
+- **AND** stored dispatch and `afind` do not `SET` a lease
+- **AND** worker expiry MAY `SET` a short-lived removal lease before delete
 
 #### Scenario: Introduce a non-Redis transport
 - **WHEN** a JetStream, NATS, Kafka, or SQS provider is added
@@ -58,7 +61,9 @@ Each concrete queue backend SHALL declare an overridable default worker class
 appropriate to its provider. `RedisAsyncQueue` and `RedisEventQueue` SHALL
 select Redis-aware workers that use claims where that semantic type requires
 them. `RedisNotificationQueue` SHALL select a Redis-aware notification worker
-that does not claim. Memory queue variants SHALL select memory-aware workers.
+that does not claim, release, or consume-remove, and that expires stored
+entries by setting a short-lived removal lease then deleting. Memory queue
+variants SHALL select memory-aware workers.
 Common worker base classes SHALL NOT access a composed provider or require
 claim, acknowledgement, retry, renewal, recovery, or settlement operations.
 Queue configuration SHALL continue to permit an explicit compatible worker

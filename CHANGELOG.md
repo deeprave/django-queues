@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.0 - 2026-08-28
+
+- Added notification queues: every connected process that sees a payload may handle it; none owns it.
+- `@queue_listener` now accepts notification aliases; `queue_observer` does not.
+- Redeploy the Redis Function library after upgrading (`redis_lua_lib --deploy`).
+
 ## v1.3.0 - 2026-08-27
 
 - Added explicit Redis Cluster backends (`RedisClusterAsyncQueue`, stack, priority, JSON, and `RedisClusterEventQueue`) that route through redis-py's asyncio Cluster client. Cluster `LOCATION` is a single database-0 seed URL; ordinary Redis backends remain standalone.

@@ -49,6 +49,7 @@ from django_queue.entries import QueueEntry, QueueEntryStatus, validate_budget
 logger = logging.getLogger(__name__)
 
 _PRIORITY_SEQUENCE_SPACE = 2**32
+_NOTIFICATION_REMOVAL_LEASE_MS = 50
 
 # This queue packs priority and an arrival-order sequence number into one
 # ZSET score: `priority * _PRIORITY_SEQUENCE_SPACE - sequence`. A double's
@@ -231,6 +232,29 @@ class QueueProviderRedis:
     def lifecycle_channel(self) -> str:
         """Return the backend-owned channel for async-queue lifecycle snapshots."""
         return f"{self._queue_name}:entries:lifecycle"
+
+    @property
+    def notification_channel(self) -> str:
+        """Return the backend-owned channel for owner-less notification payloads."""
+        return f"{self._queue_name}:notifications"
+
+    def _notification_entry_key(self, entry_id: uuid.UUID) -> str:
+        return f"{self._queue_name}:notifications:{entry_id}"
+
+    def _notification_lease_key(self, entry_id: uuid.UUID) -> str:
+        return f"{self._queue_name}:notifications:leases:{entry_id}"
+
+    @property
+    def _notification_deadlines_name(self) -> str:
+        return f"{self._queue_name}:notifications:deadlines"
+
+    @property
+    def _notification_lease_prefix(self) -> str:
+        return f"{self._queue_name}:notifications:leases:"
+
+    @property
+    def _notification_entry_prefix(self) -> str:
+        return f"{self._queue_name}:notifications:"
 
     @property
     def capacity(self) -> int:
@@ -1134,6 +1158,76 @@ class QueueProviderRedis:
         if outcome == -1:
             raise ValueError("Only terminal queue entries can be pruned")
         return self.entry_class.from_dict(json.loads(outcome))
+
+    def decode_notification(self, raw: object) -> QueueEntry:
+        """Decode a published notification payload into an entry record."""
+        if isinstance(raw, bytes | bytearray | memoryview):
+            raw = bytes(raw).decode("ascii")
+        if not isinstance(raw, str):
+            raise QueueEncodingException(
+                f"Notification payload must be text or bytes, not {type(raw).__name__}"
+            )
+        return self.entry_class.from_dict(json.loads(raw))
+
+    async def astore_notification(self, entry: QueueEntry) -> None:
+        """Store a notification, index its deadline, and publish it.
+
+        One Function writes the payload, ZADDs the sender-set deadline, then
+        PUBLISHes so every connected receiver can see it. There is no pending
+        claim list.
+        """
+        if entry.timeout_seconds is None:
+            raise ValueError("Notification entries require a resolved lifetime")
+        self._async_redis()
+        await self._fcall(
+            "django_queue_notification_store",
+            2,
+            self._notification_entry_key(entry.id),
+            self._notification_deadlines_name,
+            self.encode(json.dumps(entry.to_dict()), "ascii"),
+            self.encode(str(entry.id), "ascii"),
+            self.encode(
+                str(round(entry.timeout_seconds * MICROSECONDS_PER_SECOND)),
+                "ascii",
+            ),
+            self.notification_channel,
+        )
+
+    async def aget_notification(self, entry_id: uuid.UUID) -> QueueEntry:
+        raw = await self._fcall(
+            "django_queue_notification_get",
+            2,
+            self._notification_lease_key(entry_id),
+            self._notification_entry_key(entry_id),
+        )
+        if raw is None:
+            raise QueueEntryNotFoundError(entry_id)
+        return self.decode_notification(raw)
+
+    async def ahas_notification(self) -> bool:
+        return bool(await self._async_redis().zcard(self._notification_deadlines_name))
+
+    async def aexpire_due_notifications(self) -> list[uuid.UUID]:
+        raw_entry_id = await self._fcall(
+            "django_queue_notification_expire",
+            3,
+            self._notification_deadlines_name,
+            self._notification_lease_prefix,
+            self._notification_entry_prefix,
+            self.encode(str(_NOTIFICATION_REMOVAL_LEASE_MS), "ascii"),
+        )
+        if not raw_entry_id:
+            return []
+        return [uuid.UUID(self.decode(raw_entry_id, "ascii"))]
+
+    async def aclear_notifications(self) -> None:
+        await self._fcall(
+            "django_queue_notification_clear",
+            3,
+            self._notification_deadlines_name,
+            self._notification_lease_prefix,
+            self._notification_entry_prefix,
+        )
 
     async def aclose(self) -> None:
         loop = asyncio.get_running_loop()

@@ -13,13 +13,19 @@ from .rediscluster import (
     RedisClusterAsyncStack,
     RedisClusterAsyncStackJson,
     RedisClusterEventQueue,
+    RedisClusterNotificationQueue,
 )
 from .rediseventqueue import RedisEventQueue
+from .redisnotificationqueue import RedisNotificationQueue
 from .redispqueue import RedisAsyncPriorityQueue
 from .redispqueuejson import RedisAsyncPriorityQueueJson
 from .redisqueue import RedisAsyncQueue, RedisAsyncStack
 from .redisqueuejson import RedisAsyncQueueJson, RedisAsyncStackJson
-from .worker import RedisAsyncQueueWorker, RedisEventQueueWorker
+from .worker import (
+    RedisAsyncQueueWorker,
+    RedisEventQueueWorker,
+    RedisNotificationQueueWorker,
+)
 
 __all__ = (
     "RedisAsyncPriorityQueue",
@@ -36,6 +42,9 @@ __all__ = (
     "RedisClusterAsyncStack",
     "RedisClusterAsyncStackJson",
     "RedisClusterEventQueue",
+    "RedisClusterNotificationQueue",
     "RedisEventQueue",
     "RedisEventQueueWorker",
+    "RedisNotificationQueue",
+    "RedisNotificationQueueWorker",
 )
