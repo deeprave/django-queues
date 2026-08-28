@@ -206,6 +206,21 @@ def test_event_queue_rejects_task_handler_metadata():
         configured["events"]
 
 
+def test_notification_queue_rejects_task_handler_metadata():
+    configured = django_queue.QueueRegistry(
+        {
+            "notices": {
+                "BACKEND": "django_queue.backends.MemoryNotificationQueue",
+                "LOCATION": "",
+                "HANDLER": "tests.test_queue_runtime.receive",
+            }
+        }
+    )
+
+    with pytest.raises(InvalidQueueBackendError, match="notification queues"):
+        configured["notices"]
+
+
 def test_event_queue_uses_its_configured_event_worker_class():
     created = []
 
@@ -337,6 +352,79 @@ def test_runtime_hosts_a_worker_and_a_receiver_concurrently(monkeypatch, redis_c
 
         assert received_event == ["event"]
         assert set(runtime._tasks) == {"events", "observed"}
+    finally:
+        subscription.unsubscribe()
+        runtime.shutdown()
+        _discard_observers_for("observed")
+
+
+def test_runtime_hosts_event_observer_and_notification_concurrently(
+    monkeypatch, redis_client
+):
+    from django_queue import queue_observer
+    from django_queue.observers import _discard_observers_for
+
+    _discard_observers_for("observed")
+    configured = django_queue.QueueRegistry(
+        {
+            "events": {
+                "BACKEND": "django_queue.backends.MemoryEventQueue",
+                "LOCATION": "",
+            },
+            "notices": {
+                "BACKEND": "django_queue.backends.MemoryNotificationQueue",
+                "LOCATION": "",
+            },
+            "observed": {
+                "BACKEND": "django_queue.backends.redis.RedisAsyncQueue",
+                "LOCATION": redis_client,
+            },
+        }
+    )
+    monkeypatch.setattr(django_queue, "queues", configured)
+
+    received_event = []
+    received_notice = []
+
+    async def receive_event(entry):
+        received_event.append(entry.payload)
+        return True
+
+    async def receive_notice(entry):
+        received_notice.append(entry.payload)
+
+    monkeypatch.setattr(
+        "django_queue.event_worker.listeners_for",
+        lambda alias: (
+            (ListenerRegistration(receive_event),) if alias == "events" else ()
+        ),
+    )
+    monkeypatch.setattr(
+        "django_queue.notification_worker.listeners_for",
+        lambda alias: (
+            (ListenerRegistration(receive_notice),) if alias == "notices" else ()
+        ),
+    )
+
+    subscription = queue_observer("observed", lambda entry: None)
+    runtime = QueueRuntime()
+    try:
+        runtime.start_thread()
+        runtime.start(configured)
+        configured["events"].enqueue("event")
+        configured["notices"].enqueue("notice")
+
+        deadline = time.monotonic() + 1
+        while (
+            not received_event
+            or not received_notice
+            or set(runtime._tasks) != {"events", "notices", "observed"}
+        ) and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+        assert received_event == ["event"]
+        assert received_notice == ["notice"]
+        assert set(runtime._tasks) == {"events", "notices", "observed"}
     finally:
         subscription.unsubscribe()
         runtime.shutdown()

@@ -10,11 +10,12 @@ from django.utils.module_loading import import_string
 
 from .aliases import validate_queue_alias
 from .backends import InvalidQueueBackendError
-from .backends.base import AsyncQueue, EventQueue
+from .backends.base import AsyncQueue, EventQueue, NotificationQueue
 from .clock import ClockTime
 from .entries import QueueEntry, QueueEntryStatus, validate_budget
 from .event_worker import EventQueueWorker
 from .listeners import queue_listener
+from .notification_worker import NotificationQueueWorker
 from .observers import QueueSubscription, queue_observer
 from .providers import QueueProvider
 from .signals import queue_created
@@ -27,6 +28,8 @@ __all__ = (
     "BaseQueueWorker",
     "ClockTime",
     "EventQueueWorker",
+    "NotificationQueue",
+    "NotificationQueueWorker",
     "QueueEntry",
     "QueueEntryStatus",
     "QueueProvider",
@@ -53,7 +56,9 @@ class QueueRegistry(BaseConnectionHandler):
 
     def __init__(self, settings=None) -> None:
         super().__init__(settings)
-        self._process_queues: dict[str, AsyncQueue | EventQueue] = {}
+        self._process_queues: dict[
+            str, AsyncQueue | EventQueue | NotificationQueue
+        ] = {}
         self._process_queues_lock = threading.RLock()
 
     def configure_settings(self, settings):
@@ -159,13 +164,18 @@ class QueueRegistry(BaseConnectionHandler):
                 f"Queue alias '{alias}' event queues use registered listeners and "
                 "do not accept HANDLER metadata"
             )
+        if isinstance(queue, NotificationQueue) and handler is not None:
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' notification queues use registered listeners "
+                "and do not accept HANDLER metadata"
+            )
         queue.entry_class = entry_class
         queue.timeout_seconds = timeout_seconds
         if isinstance(queue, AsyncQueue):
             queue.retention_timeout = retention_timeout
         if worker_class is not None:
             queue.worker_class = worker_class
-        if isinstance(queue, AsyncQueue | EventQueue):
+        if isinstance(queue, AsyncQueue | EventQueue | NotificationQueue):
             queue.resolve_worker(alias)
         queue_created.send(self, name=alias, instance=queue)
         return queue

@@ -11,9 +11,10 @@ any other enqueue behaviour: JSON validation, identifier generation, and the
 SHALL accept the same optional `priority` keyword, for signature compatibility
 with the shared enqueue contract, but MUST ignore it: the persisted `priority`
 is always `0` regardless of the value supplied. Priority ordering is a
-task-dispatch concept. `EventQueue` is a claimed stream: one worker consumes
-each event. `NotificationQueue` is owner-less broadcast to connected nodes.
-Neither uses dispatch priority to choose a consumer.
+task-dispatch concept. `EventQueue` is distributed processing: a worker that
+claims an event thereafter owns it. `NotificationQueue` is see-but-do-not-own:
+every connected receiver that sees a notification may handle it, and none
+owns it. Neither uses dispatch priority to choose a consumer.
 
 #### Scenario: Enqueue an AsyncQueue entry with an explicit priority
 - **WHEN** a caller enqueues a JSON-serialisable payload on an `AsyncQueue`
@@ -25,10 +26,10 @@ Neither uses dispatch priority to choose a consumer.
 - **WHEN** a caller enqueues a JSON-serialisable payload on an `EventQueue`
   with an explicit priority value
 - **THEN** the system persists an entry whose `priority` field is `0`, and
-  claimed delivery to listeners in the winning process is unaffected
+  claimed, owned delivery in the winning process is unaffected
 
 #### Scenario: NotificationQueue ignores a supplied priority
 - **WHEN** a caller enqueues a JSON-serialisable payload on a
   `NotificationQueue` with an explicit priority value
-- **THEN** the system treats `priority` as `0`, and connected-node delivery
-  is unaffected
+- **THEN** the system treats `priority` as `0`, and see-but-do-not-own
+  delivery is unaffected

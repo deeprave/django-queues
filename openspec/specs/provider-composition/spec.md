@@ -7,17 +7,24 @@ providers, and provider-specific workers.
 ## Requirements
 
 ### Requirement: Compose providers into semantic queue facades
-`AsyncQueue` and `EventQueue` SHALL provide generic queue-facing semantics by
-composing a provider. They SHALL NOT inherit, mirror, or expose a provider's
-transport operations as queue methods. Concrete backend queues, including
-`RedisAsyncQueue`, `RedisEventQueue`, `MemoryAsyncQueue`, and
-`MemoryEventQueue`, SHALL only select and inject their provider and default
-worker behaviour.
+`AsyncQueue`, `EventQueue`, and `NotificationQueue` SHALL provide generic
+queue-facing semantics by composing a provider. They SHALL NOT inherit, mirror,
+or expose a provider's transport operations as queue methods. Concrete backend
+queues, including `RedisAsyncQueue`, `RedisEventQueue`,
+`RedisNotificationQueue`, `MemoryAsyncQueue`, `MemoryEventQueue`, and
+`MemoryNotificationQueue`, SHALL only select and inject their provider and
+default worker behaviour.
 
 #### Scenario: Construct a Redis async queue
 - **WHEN** an application constructs `RedisAsyncQueue`
 - **THEN** it receives an `AsyncQueue` semantic facade composed with a Redis
   provider and a Redis-aware default async-queue worker
+
+#### Scenario: Construct a Redis notification queue
+- **WHEN** an application constructs `RedisNotificationQueue`
+- **THEN** it receives a `NotificationQueue` semantic facade composed with a
+  Redis provider and a Redis-aware notification worker that does not
+  claim, release, or consume-remove
 
 #### Scenario: Use a queue-facing API
 - **WHEN** application code produces, reads, or administers queue entries
@@ -33,9 +40,16 @@ providers require the same transport-independent contract. A transport-aware
 worker SHALL implement delivery using its provider's native model.
 
 #### Scenario: Redis delivery
-- **WHEN** a Redis default worker dispatches an entry
+- **WHEN** a Redis default worker dispatches an AsyncQueue or EventQueue entry
 - **THEN** it uses Redis claim, lease renewal, acknowledgement, settlement,
-  recovery, and retention operations owned by the Redis provider
+  recovery, and retention operations owned by the Redis provider as applicable
+  to that semantic type
+
+#### Scenario: Redis notification delivery
+- **WHEN** a Redis notification worker dispatches a payload
+- **THEN** it does not take an ownership claim, release, or consume-remove
+- **AND** stored dispatch and `afind` do not `SET` a lease
+- **AND** worker expiry MAY `SET` a short-lived removal lease before delete
 
 #### Scenario: Introduce a non-Redis transport
 - **WHEN** a JetStream, NATS, Kafka, or SQS provider is added
@@ -70,19 +84,23 @@ provider they receive during backend-controlled construction.
 ### Requirement: Select workers by concrete backend
 Each concrete queue backend SHALL declare an overridable default worker class
 appropriate to its provider. `RedisAsyncQueue` and `RedisEventQueue` SHALL
-select Redis-aware workers; memory queue variants SHALL select memory-aware
-workers. Common worker base classes SHALL NOT access a composed provider or
-require claim, acknowledgement, retry, renewal, recovery, or settlement
-operations. Queue configuration SHALL continue to permit an explicit compatible
-worker override.
+select Redis-aware workers that use claims where that semantic type requires
+them. `RedisNotificationQueue` SHALL select a Redis-aware notification worker
+that does not claim, release, or consume-remove, and that expires stored
+entries by setting a short-lived removal lease then deleting. Memory queue
+variants SHALL select memory-aware workers.
+Common worker base classes SHALL NOT access a composed provider or require
+claim, acknowledgement, retry, renewal, recovery, or settlement operations.
+Queue configuration SHALL continue to permit an explicit compatible worker
+override.
 
 #### Scenario: Run configured Redis queues
-- **WHEN** Django starts configured Redis task and event queues
+- **WHEN** Django starts configured Redis task, event, and notification queues
 - **THEN** their respective Redis-aware workers are selected without callers
   supplying transport details
 
 #### Scenario: Run configured memory queues
-- **WHEN** Django starts configured memory async or event queues
+- **WHEN** Django starts configured memory async, event, or notification queues
 - **THEN** their respective memory-aware workers are selected without callers
   supplying transport details
 

@@ -128,13 +128,14 @@ alongside the standard lifecycle fields. Supplying a priority MUST NOT change
 any other enqueue behaviour: JSON validation, identifier generation, and the
 `queued` status and `queued_at` timestamp are unaffected.
 
-`EventQueue`'s entry-oriented enqueue operation SHALL accept the same optional
-`priority` keyword, for signature compatibility with the shared enqueue
-contract, but MUST ignore it: an event's persisted `priority` is always `0`
-regardless of the value supplied, and dispatch order is unaffected. Priority
-ordering is a task-dispatch concept; `EventQueue` delivers each event to every
-registered listener rather than to a single consumer, so a dispatch priority
-does not apply to it.
+`EventQueue`'s and `NotificationQueue`'s entry-oriented enqueue operations
+SHALL accept the same optional `priority` keyword, for signature compatibility
+with the shared enqueue contract, but MUST ignore it: the persisted `priority`
+is always `0` regardless of the value supplied. Priority ordering is a
+task-dispatch concept. `EventQueue` is distributed processing: a worker that
+claims an event thereafter owns it. `NotificationQueue` is see-but-do-not-own:
+every connected receiver that sees a notification may handle it, and none
+owns it. Neither uses dispatch priority to choose a consumer.
 
 #### Scenario: Enqueue an AsyncQueue entry with an explicit priority
 - **WHEN** a caller enqueues a JSON-serialisable payload on an `AsyncQueue`
@@ -146,7 +147,13 @@ does not apply to it.
 - **WHEN** a caller enqueues a JSON-serialisable payload on an `EventQueue`
   with an explicit priority value
 - **THEN** the system persists an entry whose `priority` field is `0`, and
-  delivery to registered listeners is unaffected
+  claimed, owned delivery in the winning process is unaffected
+
+#### Scenario: NotificationQueue ignores a supplied priority
+- **WHEN** a caller enqueues a JSON-serialisable payload on a
+  `NotificationQueue` with an explicit priority value
+- **THEN** the system treats `priority` as `0`, and see-but-do-not-own
+  delivery is unaffected
 
 ### Requirement: Record entry lifecycle outcomes
 

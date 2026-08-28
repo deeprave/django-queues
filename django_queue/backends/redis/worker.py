@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from contextlib import suppress
 from dataclasses import replace
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from django_queue.backends.exceptions import (
 from django_queue.clock import MICROSECONDS_PER_SECOND
 from django_queue.entries import QueueEntry, QueueEntryStatus
 from django_queue.event_worker import EventQueueWorker
+from django_queue.notification_worker import NotificationQueueWorker
 from django_queue.worker import AsyncQueueWorker
 
 logger = logging.getLogger(__name__)
@@ -233,3 +235,85 @@ class RedisEventQueueWorker(EventQueueWorker):
     async def _remove(self, entry: QueueEntry) -> None:
         if not await self._provider.aremove(entry.id, self._worker_id):
             logger.warning("Lost claim for event entry %s before removal", entry.id)
+
+
+class RedisNotificationQueueWorker(NotificationQueueWorker):
+    """Default notification worker for queues composed with QueueProviderRedis."""
+
+    provider_kind = "redis"
+    provider_type = "redis"
+
+    def __init__(self, queue, **kwargs) -> None:
+        super().__init__(queue, **kwargs)
+        self._provider = queue._provider
+        self._pubsub = None
+        self._pubsub_client = None
+
+    async def run(self) -> None:
+        self._running = True
+        try:
+            await self._ensure_subscribed()
+            while True:
+                await self.adispatch_once()
+        finally:
+            self._running = False
+            await self._aclose_pubsub()
+
+    async def _next(self) -> QueueEntry | None:
+        await self._ensure_subscribed()
+        pubsub = self._pubsub
+        if pubsub is None:
+            return None
+        message = await pubsub.get_message(
+            ignore_subscribe_messages=True, timeout=self._idle_delay
+        )
+        if not message or message.get("type") != "message":
+            return None
+        try:
+            return self._provider.decode_notification(message["data"])
+        except Exception:
+            logger.exception(
+                "Ignoring invalid notification payload",
+                extra={"queue": self._queue.queue_name},
+            )
+            return None
+
+    async def _expire_due(self) -> None:
+        expired_entry_ids = await self._provider.aexpire_due_notifications()
+        for entry_id in expired_entry_ids:
+            logger.warning(
+                "Discarded expired notification",
+                extra={"queue": self._queue.queue_name, "entry_id": str(entry_id)},
+            )
+
+    async def _ensure_subscribed(self) -> None:
+        if self._pubsub is not None:
+            return
+        client = await self._provider._prepare_async_client(
+            self._provider._create_async_client()
+        )
+        pubsub = client.pubsub(ignore_subscribe_messages=True)
+        try:
+            await pubsub.subscribe(self._provider.notification_channel)
+        except BaseException:
+            try:
+                with suppress(BaseException):
+                    await pubsub.aclose()
+            finally:
+                with suppress(BaseException):
+                    await self._provider._aclose_client(client)
+            raise
+        self._pubsub_client = client
+        self._pubsub = pubsub
+
+    async def _aclose_pubsub(self) -> None:
+        pubsub = self._pubsub
+        client = self._pubsub_client
+        self._pubsub = None
+        self._pubsub_client = None
+        try:
+            if pubsub is not None:
+                await pubsub.aclose()
+        finally:
+            if client is not None:
+                await self._provider._aclose_client(client)

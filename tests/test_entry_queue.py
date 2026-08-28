@@ -317,6 +317,20 @@ class TestMemoryAsyncQueueEntries:
         with pytest.raises(TypeError, match="AsyncQueue"):
             queue_observer("events", lambda entry: None)
 
+    def test_observer_rejects_notification_queue(self, monkeypatch, no_runtime_startup):
+        handler = django_queue.QueueRegistry(
+            {
+                "notices": {
+                    "BACKEND": "django_queue.backends.MemoryNotificationQueue",
+                    "LOCATION": "",
+                }
+            }
+        )
+        monkeypatch.setattr(django_queue, "queues", handler)
+
+        with pytest.raises(TypeError, match="AsyncQueue"):
+            queue_observer("notices", lambda entry: None)
+
     def test_observer_drops_snapshots_after_its_queue_delivery_queue_is_full(
         self, observer_queue, caplog
     ):

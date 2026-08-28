@@ -14,6 +14,7 @@ from .memory import (
     MemoryAsyncQueue,
     MemoryAsyncStack,
     MemoryEventQueue,
+    MemoryNotificationQueue,
 )
 
 __all__ = (
@@ -22,6 +23,7 @@ __all__ = (
     "MemoryAsyncQueue",
     "MemoryAsyncStack",
     "MemoryEventQueue",
+    "MemoryNotificationQueue",
     "QueueClaimConflictError",
     "QueueEmptyException",
     "QueueEncodingException",

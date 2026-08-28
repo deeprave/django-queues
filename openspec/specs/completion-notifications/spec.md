@@ -49,6 +49,11 @@ Channels, or WebSockets.
 - **THEN** it raises an error identifying that lifecycle observation requires
   an AsyncQueue
 
+#### Scenario: Reject a notification queue observer
+- **WHEN** an application calls `queue_observer` for a NotificationQueue
+- **THEN** it raises an error identifying that lifecycle observation requires
+  an AsyncQueue
+
 #### Scenario: Serve concurrent registrations for one alias from a single runtime
 - **WHEN** two different threads each register an observer for the same
   queue alias for the first time

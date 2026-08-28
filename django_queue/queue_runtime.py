@@ -1,4 +1,4 @@
-"""One process-local asyncio runtime for configured event and async queues."""
+"""One process-local asyncio runtime for configured event, notification, and async queues."""
 
 from __future__ import annotations
 
@@ -8,7 +8,12 @@ import threading
 from collections.abc import Iterator
 from typing import Protocol
 
-from django_queue.backends.base import AsyncQueue, BaseQueue, EventQueue
+from django_queue.backends.base import (
+    AsyncQueue,
+    BaseQueue,
+    EventQueue,
+    NotificationQueue,
+)
 from django_queue.observers import (
     _activate_pending_for,
     _alias_has_observer_registration,
@@ -29,10 +34,12 @@ class QueueLookup(Protocol):
 class QueueRuntime:
     """Own one background loop hosting one task per configured queue alias.
 
-    An alias is either an EventQueue (a worker task: claim, dispatch to
-    listeners, settle) or an AsyncQueue with observers registered (a
-    receiver task: relay lifecycle snapshots to `queue_observer`
-    callbacks) -- never both -- so one alias-keyed task dict serves both.
+    An alias is an EventQueue (a worker task: claim, dispatch to listeners,
+    settle), a NotificationQueue (a receiver task: see the payload, dispatch
+    to all eligible local listeners, expire stored entries), or an AsyncQueue
+    with observers registered (a receiver task: relay lifecycle snapshots to
+    `queue_observer` callbacks) -- never more than one of these -- so one
+    alias-keyed task dict serves all three.
     """
 
     restart_initial_delay = 1.0
@@ -44,7 +51,7 @@ class QueueRuntime:
         self._thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._tasks: dict[str, asyncio.Task[None]] = {}
-        self._queues: dict[str, EventQueue | AsyncQueue] = {}
+        self._queues: dict[str, EventQueue | AsyncQueue | NotificationQueue] = {}
         self._closed = False
 
     def start_thread(self) -> None:
@@ -76,7 +83,7 @@ class QueueRuntime:
         self._ready.wait()
 
     def start(self, queues: QueueLookup) -> None:
-        """Schedule tasks for every configured event and async queue.
+        """Schedule tasks for every configured event, notification, and async queue.
 
         Walks every alias in `queues`, resolving each via `queues[alias]`.
         Callers whose own resolution of `alias` is not yet complete (e.g.
@@ -89,10 +96,13 @@ class QueueRuntime:
             if self._closed:
                 return
         event_queues = []
+        notification_queues = []
         receiver_queues = []
         for alias in queues:
-            self._classify(alias, queues[alias], event_queues, receiver_queues)
-        self._start_classified(event_queues, receiver_queues)
+            self._classify(
+                alias, queues[alias], event_queues, notification_queues, receiver_queues
+            )
+        self._start_classified(event_queues, notification_queues, receiver_queues)
 
     def start_one(self, alias: str, queue: BaseQueue) -> None:
         """Schedule the task for one already-resolved alias.
@@ -105,19 +115,23 @@ class QueueRuntime:
             if self._closed:
                 return
         event_queues = []
+        notification_queues = []
         receiver_queues = []
-        self._classify(alias, queue, event_queues, receiver_queues)
-        self._start_classified(event_queues, receiver_queues)
+        self._classify(alias, queue, event_queues, notification_queues, receiver_queues)
+        self._start_classified(event_queues, notification_queues, receiver_queues)
 
     def _classify(
         self,
         alias: str,
         queue: object,
         event_queues: list[tuple[str, EventQueue]],
+        notification_queues: list[tuple[str, NotificationQueue]],
         receiver_queues: list[tuple[str, AsyncQueue]],
     ) -> None:
         if isinstance(queue, EventQueue):
             event_queues.append((alias, queue))
+        elif isinstance(queue, NotificationQueue):
+            notification_queues.append((alias, queue))
         elif isinstance(queue, AsyncQueue) and _alias_has_observer_registration(alias):
             # Activation replays synchronous, blocking work (a snapshot
             # fetch via configured_queue.list()), so it must happen here,
@@ -132,9 +146,10 @@ class QueueRuntime:
     def _start_classified(
         self,
         event_queues: list[tuple[str, EventQueue]],
+        notification_queues: list[tuple[str, NotificationQueue]],
         receiver_queues: list[tuple[str, AsyncQueue]],
     ) -> None:
-        if not event_queues and not receiver_queues:
+        if not event_queues and not notification_queues and not receiver_queues:
             return
         with self._lock:
             if self._closed or self._loop is None:
@@ -142,6 +157,10 @@ class QueueRuntime:
             loop = self._loop
             for alias, queue in event_queues:
                 loop.call_soon_threadsafe(self._start_worker, alias, queue)
+            for alias, queue in notification_queues:
+                loop.call_soon_threadsafe(
+                    self._start_notification_receiver, alias, queue
+                )
             for alias, queue in receiver_queues:
                 loop.call_soon_threadsafe(self._start_receiver, alias, queue)
 
@@ -213,6 +232,55 @@ class QueueRuntime:
             task.result()
         except Exception:
             logger.exception("Event worker supervisor failed", extra={"queue": alias})
+
+    def _start_notification_receiver(
+        self, alias: str, queue: NotificationQueue
+    ) -> None:
+        with self._lock:
+            if self._closed or alias in self._tasks:
+                return
+            self._queues[alias] = queue
+            task = asyncio.create_task(
+                self._run_notification_receiver(alias, queue),
+                name=f"notification:{alias}",
+            )
+            self._tasks[alias] = task
+        task.add_done_callback(
+            lambda task: self._notification_receiver_done(alias, task)
+        )
+
+    async def _run_notification_receiver(
+        self, alias: str, queue: NotificationQueue
+    ) -> None:
+        """Keep one notification receiver available across transient failures."""
+        delay = self.restart_initial_delay
+        while True:
+            try:
+                await queue.create_worker(alias).run()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Notification receiver stopped unexpectedly", extra={"queue": alias}
+                )
+            else:
+                logger.error(
+                    "Notification receiver stopped unexpectedly", extra={"queue": alias}
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, self.restart_max_delay)
+
+    def _notification_receiver_done(self, alias: str, task: asyncio.Task[None]) -> None:
+        with self._lock:
+            self._tasks.pop(alias, None)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception(
+                "Notification receiver supervisor failed", extra={"queue": alias}
+            )
 
     def _start_receiver(self, alias: str, queue: AsyncQueue) -> None:
         with self._lock:

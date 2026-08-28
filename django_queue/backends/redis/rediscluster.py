@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .provider import QueueProviderRedisCluster
 from .rediseventqueue import RedisEventQueue
+from .redisnotificationqueue import RedisNotificationQueue
 from .redispqueue import RedisAsyncPriorityQueue
 from .redispqueuejson import RedisAsyncPriorityQueueJson
 from .redisqueue import RedisAsyncQueue, RedisAsyncStack
@@ -43,5 +44,10 @@ class RedisClusterAsyncPriorityQueueJson(RedisAsyncPriorityQueueJson):
 
 
 class RedisClusterEventQueue(RedisEventQueue):
+    redis_topology = "cluster"
+    provider_class = _CLUSTER_PROVIDER
+
+
+class RedisClusterNotificationQueue(RedisNotificationQueue):
     redis_topology = "cluster"
     provider_class = _CLUSTER_PROVIDER

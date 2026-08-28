@@ -6,7 +6,7 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 from uuid import UUID, uuid7
 
 from asgiref.sync import async_to_sync
@@ -27,8 +27,11 @@ from django_queue.signals import send_entry_enqueued
 
 logger = logging.getLogger(__name__)
 
+_WorkerT = TypeVar("_WorkerT")
+
 if TYPE_CHECKING:
     from django_queue.event_worker import EventQueueWorker
+    from django_queue.notification_worker import NotificationQueueWorker
     from django_queue.worker import AsyncQueueWorker, Handler
 
 
@@ -77,6 +80,39 @@ class BaseQueue(ABC):
             issubclass(worker_class, compatible_worker_class)
             and worker_class.provider_type == self.worker_provider_type
         )
+
+    def _resolve_worker(
+        self, alias: str, required_base: type[_WorkerT]
+    ) -> type[_WorkerT]:
+        """Import and validate this queue's configured worker class."""
+        worker_class = self.worker_class
+        if isinstance(worker_class, str):
+            if not worker_class:
+                raise InvalidQueueBackendError(
+                    f"Queue alias '{alias}' WORKER must be a non-empty dotted path"
+                )
+            try:
+                worker_class = import_string(worker_class)
+            except ImportError as exc:
+                raise InvalidQueueBackendError(
+                    f"Queue alias '{alias}' WORKER could not be imported: {exc}"
+                ) from exc
+        if not isinstance(worker_class, type) or not issubclass(
+            worker_class, required_base
+        ):
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' WORKER must be a {required_base.__name__} subclass"
+            )
+        if worker_class.provider_kind != self.worker_provider_kind:
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' requires a {self.worker_provider_kind} worker"
+            )
+        if not self._worker_class_is_compatible(worker_class):
+            raise InvalidQueueBackendError(
+                f"Queue alias '{alias}' WORKER is not compatible with "
+                f"{type(self).__name__}"
+            )
+        return worker_class
 
     @property
     def stack(self):
@@ -180,9 +216,9 @@ class BaseQueue(ABC):
         with it, so it survives enqueue and reaches whichever worker dispatches
         the entry. `available_at` delays eligibility where scheduling is
         supported. `priority` is only consulted by priority-variant `AsyncQueue`
-        backends; ignored elsewhere (e.g. by `EventQueue` and non-priority
-        `AsyncQueue` backends, whose dispatch order -- FIFO, or LIFO for a
-        stack -- is unaffected by it).
+        backends; ignored elsewhere (e.g. by `EventQueue`, `NotificationQueue`,
+        and non-priority `AsyncQueue` backends, whose dispatch order -- FIFO,
+        or LIFO for a stack -- is unaffected by it).
         """
         raise NotImplementedError("aenqueue")
 
@@ -230,34 +266,7 @@ class AsyncQueue(BaseQueue):
         # Imported here so the storage layer does not depend on the worker layer.
         from django_queue.worker import AsyncQueueWorker
 
-        worker_class = self.worker_class
-        if isinstance(worker_class, str):
-            if not worker_class:
-                raise InvalidQueueBackendError(
-                    f"Queue alias '{alias}' WORKER must be a non-empty dotted path"
-                )
-            try:
-                worker_class = import_string(worker_class)
-            except ImportError as exc:
-                raise InvalidQueueBackendError(
-                    f"Queue alias '{alias}' WORKER could not be imported: {exc}"
-                ) from exc
-        if not isinstance(worker_class, type) or not issubclass(
-            worker_class, AsyncQueueWorker
-        ):
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' WORKER must be an AsyncQueueWorker subclass"
-            )
-        if worker_class.provider_kind != self.worker_provider_kind:
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' requires a {self.worker_provider_kind} worker"
-            )
-        if not self._worker_class_is_compatible(worker_class):
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' WORKER is not compatible with "
-                f"{type(self).__name__}"
-            )
-        return worker_class
+        return self._resolve_worker(alias, AsyncQueueWorker)
 
     def create_worker(self, alias: str, handler: Handler) -> AsyncQueueWorker:
         """Create this queue's configured worker when it becomes active.
@@ -577,34 +586,7 @@ class EventQueue(BaseQueue):
         """Import and validate this event queue's configured worker class."""
         from django_queue.event_worker import EventQueueWorker
 
-        worker_class = self.worker_class
-        if isinstance(worker_class, str):
-            if not worker_class:
-                raise InvalidQueueBackendError(
-                    f"Queue alias '{alias}' WORKER must be a non-empty dotted path"
-                )
-            try:
-                worker_class = import_string(worker_class)
-            except ImportError as exc:
-                raise InvalidQueueBackendError(
-                    f"Queue alias '{alias}' WORKER could not be imported: {exc}"
-                ) from exc
-        if not isinstance(worker_class, type) or not issubclass(
-            worker_class, EventQueueWorker
-        ):
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' WORKER must be an EventQueueWorker subclass"
-            )
-        if worker_class.provider_kind != self.worker_provider_kind:
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' requires a {self.worker_provider_kind} worker"
-            )
-        if not self._worker_class_is_compatible(worker_class):
-            raise InvalidQueueBackendError(
-                f"Queue alias '{alias}' WORKER is not compatible with "
-                f"{type(self).__name__}"
-            )
-        return worker_class
+        return self._resolve_worker(alias, EventQueueWorker)
 
     def create_worker(self, alias: str) -> EventQueueWorker:
         """Create this queue's local listener worker."""
@@ -638,3 +620,84 @@ class EventQueue(BaseQueue):
                 extra={"queue": self.queue_name, "entry_id": str(entry_id)},
             )
         return len(expired_entry_ids)
+
+
+class NotificationQueue(BaseQueue):
+    """A queue whose listeners see a payload without owning it."""
+
+    default_lifetime_seconds = 60
+    worker_class: type[NotificationQueueWorker] | str = (
+        "django_queue.notification_worker.NotificationQueueWorker"
+    )
+    compatible_worker_class: type[NotificationQueueWorker] | str = (
+        "django_queue.notification_worker.NotificationQueueWorker"
+    )
+
+    def _configure_provider_entry_class(self) -> None:
+        self._provider.entry_class = self.entry_class
+
+    async def aclear(self) -> None:
+        await super().aclear()
+        await self._provider.aclear_notifications()
+
+    async def aenqueue(
+        self,
+        payload,
+        *,
+        timeout_seconds: float | None = None,
+        priority: int = 0,
+        available_at: ClockTime | None = None,
+    ) -> UUID:
+        """`priority` and `available_at` are accepted for signature compatibility
+        with `AsyncQueue` and ignored -- notifications always dispatch to every
+        connected receiver that sees them, without ownership or ordering."""
+        validate_json_value(payload)
+        lifetime = validate_budget(self._resolve_lifetime(timeout_seconds))
+        entry = self.entry_class.create(
+            queue=self.queue_name,
+            payload=payload,
+            queued_at=await self.clock.anow(),
+            timeout_seconds=lifetime,
+        )
+        self._configure_provider_entry_class()
+        await self._astore_notification(entry)
+        return entry.id
+
+    async def _astore_notification(self, entry: QueueEntry) -> None:
+        """Store a freshly enqueued notification for seeing and later expiry.
+
+        Memory does this as local store plus an in-process seen copy. Redis
+        implements store in the provider Function that writes the payload,
+        indexes the deadline, and publishes.
+        """
+        await self._provider.astore_notification(entry)
+
+    async def afind(self, entry_id: UUID) -> QueueEntry:
+        self._configure_provider_entry_class()
+        return await self._provider.aget_notification(entry_id)
+
+    async def ahas_pending(self) -> bool:
+        return await self._provider.ahas_notification()
+
+    async def adequeue(self) -> QueueEntry:
+        raise TypeError("NotificationQueue does not consume payloads")
+
+    def resolve_worker(self, alias: str) -> type[NotificationQueueWorker]:
+        """Import and validate this notification queue's configured worker class."""
+        from django_queue.notification_worker import NotificationQueueWorker
+
+        return self._resolve_worker(alias, NotificationQueueWorker)
+
+    def create_worker(self, alias: str) -> NotificationQueueWorker:
+        """Create this queue's local notification receiver."""
+        return self.resolve_worker(alias)(self, alias=alias)
+
+    def _resolve_lifetime(self, timeout_seconds: float | None) -> float:
+        """Resolve a notification's stored lifetime from its available context."""
+        return (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self.timeout_seconds
+            if self.timeout_seconds is not None
+            else self.default_lifetime_seconds
+        )
