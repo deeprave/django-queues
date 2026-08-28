@@ -1,7 +1,7 @@
 [project]
 name = "django-queues"
 version = "1.4.0"
-description = "Implementation of async/task and event queues for Django"
+description = "Implementation of async/task, event, and notification queues for Django"
 readme = "README.md"
 license = { file = "LICENSE.md" }
 requires-python = ">=3.14"
@@ -31,9 +31,9 @@ minversion = "7.0"
 pythonpath = ["."]
 testpaths = ["tests"]
 filterwarnings = [
-    "error",
     "ignore:unclosed <socket.socket fd=[0-9]+, family=1, type=1, proto=0>:ResourceWarning",
     "ignore:Exception ignored while finalizing socket.*family=1, type=1, proto=0:pytest.PytestUnraisableExceptionWarning",
+    "error",
 ]
 
 [dependency-groups]
