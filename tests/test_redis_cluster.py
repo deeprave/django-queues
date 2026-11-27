@@ -1,5 +1,6 @@
 import asyncio
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
 from uuid import uuid4
@@ -937,6 +938,15 @@ def test_cluster_queue_keys_share_one_hash_slot(redis_cluster_url, redis_cluster
     finally:
         cluster.close()
         asyncio.run(queue.aclose())
+
+
+def test_cluster_image_pins_redis_812_with_plaintext_cluster_bus():
+    image_dir = Path(__file__).parent / "redis-cluster"
+    dockerfile = (image_dir / "Dockerfile").read_text()
+    entrypoint = (image_dir / "entrypoint.sh").read_text()
+
+    assert "FROM redis:8.12.0" in dockerfile
+    assert entrypoint.count("--cluster-bus-port-protected-mode no") == 2
 
 
 def test_cluster_provider_fails_clearly_when_the_slot_owner_lacks_the_library(

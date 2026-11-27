@@ -1,4 +1,4 @@
-FROM redis:8
+FROM redis:8.12.0
 
 COPY entrypoint.sh /usr/local/bin/cluster-entrypoint.sh
 RUN chmod +x /usr/local/bin/cluster-entrypoint.sh

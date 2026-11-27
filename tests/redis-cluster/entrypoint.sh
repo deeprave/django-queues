@@ -29,6 +29,7 @@ for port in 7000 7001 7002; do
       --cluster-enabled yes \
       --cluster-config-file "/data/${port}/nodes.conf" \
       --cluster-node-timeout 5000 \
+      --cluster-bus-port-protected-mode no \
       --appendonly yes \
       --daemonize yes \
       --protected-mode no \
@@ -40,6 +41,7 @@ for port in 7000 7001 7002; do
       --cluster-enabled yes \
       --cluster-config-file "/data/${port}/nodes.conf" \
       --cluster-node-timeout 5000 \
+      --cluster-bus-port-protected-mode no \
       --appendonly yes \
       --daemonize yes \
       --protected-mode no \
