@@ -16,9 +16,10 @@ class MemoryAsyncQueue(AsyncQueue):
         maxsize = options.pop("maxsize", 0)
         self._stack = bool(options.pop("stack", False))
         self._queue_name = options.pop("queue_name", "default")
-        self._clock: QueueClock = options.pop("clock", DEFAULT_CLOCK)
+        clock: QueueClock = options.pop("clock", DEFAULT_CLOCK)
+        self._clock = clock
         self._provider = QueueProviderMemory(
-            clock=self._clock,
+            clock=clock,
             stack=self._stack,
             maxsize=maxsize,
         )

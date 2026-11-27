@@ -505,12 +505,8 @@ class EventQueue(BaseQueue):
     """A queue whose listeners consume transient events."""
 
     default_lifetime_seconds = 60
-    worker_class: type[EventQueueWorker] | str = (
-        "django_queue.event_worker.EventQueueWorker"
-    )
-    compatible_worker_class: type[EventQueueWorker] | str = (
-        "django_queue.event_worker.EventQueueWorker"
-    )
+    worker_class = "django_queue.event_worker.EventQueueWorker"
+    compatible_worker_class = "django_queue.event_worker.EventQueueWorker"
 
     def __init__(self) -> None:
         # This identity belongs to the queue runtime, not to an individual
@@ -626,12 +622,8 @@ class NotificationQueue(BaseQueue):
     """A queue whose listeners see a payload without owning it."""
 
     default_lifetime_seconds = 60
-    worker_class: type[NotificationQueueWorker] | str = (
-        "django_queue.notification_worker.NotificationQueueWorker"
-    )
-    compatible_worker_class: type[NotificationQueueWorker] | str = (
-        "django_queue.notification_worker.NotificationQueueWorker"
-    )
+    worker_class = "django_queue.notification_worker.NotificationQueueWorker"
+    compatible_worker_class = "django_queue.notification_worker.NotificationQueueWorker"
 
     def _configure_provider_entry_class(self) -> None:
         self._provider.entry_class = self.entry_class
