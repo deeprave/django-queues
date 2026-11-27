@@ -72,6 +72,18 @@ try:
 
         return f" stdout={decode(stdout)!r} stderr={decode(stderr)!r}"
 
+    def _start_container(container, description):
+        try:
+            container.start()
+        except (RuntimeError, TimeoutError) as exc:
+            detail = _container_log_detail(container)
+            container.stop()
+            raise RuntimeError(
+                f"{description} container failed to start: {exc}.{detail}"
+            ) from exc
+
+        return container
+
     @pytest.fixture(scope="module")
     def redis_container():
         try:
@@ -120,8 +132,11 @@ try:
                     .with_exposed_ports(*_CLUSTER_PORTS)
                     .waiting_for(LogMessageWaitStrategy("cluster-ready"))
                 )
-                with container:
+                _start_container(container, "Redis Cluster")
+                try:
                     yield container
+                finally:
+                    container.stop()
         except DockerException as exc:
             pytest.skip(f"Docker is unavailable for Redis Cluster tests: {exc}")
 
@@ -183,16 +198,11 @@ try:
                 .with_command(_TLS_REDIS_CMD)
                 .waiting_for(LogMessageWaitStrategy("Ready to accept connections"))
             )
+            _start_container(container, "Redis TLS")
             try:
-                with container:
-                    yield container
-            except DockerException:
-                raise
-            except (RuntimeError, TimeoutError) as exc:
-                detail = _container_log_detail(container)
-                raise RuntimeError(
-                    f"Redis TLS container failed to start: {exc}.{detail}"
-                ) from exc
+                yield container
+            finally:
+                container.stop()
         except DockerException as exc:
             pytest.skip(f"Docker is unavailable for Redis TLS tests: {exc}")
 
@@ -223,8 +233,11 @@ try:
                     .with_volume_mapping(str(redis_tls_certs.directory), "/tls", "ro")
                     .waiting_for(LogMessageWaitStrategy("cluster-ready"))
                 )
-                with container:
+                _start_container(container, "Redis Cluster TLS")
+                try:
                     yield container
+                finally:
+                    container.stop()
         except DockerException as exc:
             pytest.skip(f"Docker is unavailable for Redis Cluster TLS tests: {exc}")
 

@@ -21,5 +21,6 @@ class MemoryNotificationQueue(NotificationQueue):
         self.entry_class = options.pop("entry_class", self.entry_class)
         maxsize = options.pop("maxsize", 0)
         self._queue_name = options.pop("queue_name", "default")
-        self._clock: QueueClock = options.pop("clock", DEFAULT_CLOCK)
-        self._provider = QueueProviderMemory(clock=self._clock, maxsize=maxsize)
+        clock: QueueClock = options.pop("clock", DEFAULT_CLOCK)
+        self._clock = clock
+        self._provider = QueueProviderMemory(clock=clock, maxsize=maxsize)
